@@ -3,10 +3,15 @@
 Functions to query BTC price from Binance and compute trend.
 Uses only public endpoints (no authentication).
 """
+from __future__ import annotations
 
+import logging
 import os
+
 import requests
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -25,14 +30,14 @@ BB_STD = int(os.getenv('BB_STD', '2'))
 ADX_PERIOD = int(os.getenv('ADX_PERIOD', '7'))
 
 
-def get_btc_price(symbol="BTCUSDT"):
+def get_btc_price(symbol: str = "BTCUSDT") -> float:
     """Returns the current price for a symbol from Binance."""
     r = _session.get(f"{BINANCE_API}/ticker/price", params={"symbol": symbol}, timeout=10)
     r.raise_for_status()
     return float(r.json()["price"])
 
 
-def get_price_at_timestamp(timestamp_sec, symbol="BTCUSDT"):
+def get_price_at_timestamp(timestamp_sec: int, symbol: str = "BTCUSDT") -> float:
     """Returns the open price at a specific timestamp (Price to Beat).
 
     Args:
@@ -57,12 +62,12 @@ def get_price_at_timestamp(timestamp_sec, symbol="BTCUSDT"):
         data = r.json()
         if data:
             return float(data[0][1])  # open price
-    except Exception:
-        pass
+    except (requests.RequestException, ValueError, KeyError) as e:
+        logger.debug("get_price_at_timestamp error: %s", e)
     return 0.0
 
 
-def get_klines(symbol="BTCUSDT", interval="1m", limit=15):
+def get_klines(symbol: str = "BTCUSDT", interval: str = "1m", limit: int = 15) -> list[dict]:
     """
     Returns the latest candles for a symbol.
 
@@ -93,10 +98,10 @@ def get_klines(symbol="BTCUSDT", interval="1m", limit=15):
     return candles
 
 
-def compute_rsi(candles, period=None):
+def compute_rsi(candles: list[dict], period: int | None = None) -> float:
+    """Fast RSI for scalping (short period = more reactive)"""
     if period is None:
         period = RSI_PERIOD
-    """Fast RSI for scalping (short period = more reactive)"""
     if len(candles) < period + 1:
         return 50.0  # neutral
 
@@ -109,6 +114,9 @@ def compute_rsi(candles, period=None):
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period
 
+    if avg_gain == 0 and avg_loss == 0:
+        return 50.0
+
     if avg_loss == 0:
         return 100.0
 
@@ -116,7 +124,7 @@ def compute_rsi(candles, period=None):
     return 100 - (100 / (1 + rs))
 
 
-def compute_atr(candles):
+def compute_atr(candles: list[dict]) -> float:
     """ATR (Average True Range) - measures volatility"""
     if len(candles) < 2:
         return 0.0
@@ -135,11 +143,11 @@ def compute_atr(candles):
     return sum(trs) / len(trs) if trs else 0.0
 
 
-def compute_adx(candles, period=None):
-    if period is None:
-        period = ADX_PERIOD
+def compute_adx(candles: list[dict], period: int | None = None) -> float:
     """ADX (Average Directional Index) - measures trend strength (0-100).
     High ADX (>25) = strong trend, Low ADX (<20) = range/chop."""
+    if period is None:
+        period = ADX_PERIOD
     if len(candles) < period + 2:
         return 25.0  # neutral
 
@@ -203,11 +211,11 @@ def compute_adx(candles, period=None):
     return adx
 
 
-def compute_bollinger_bandwidth(candles, period=None):
-    if period is None:
-        period = BB_PERIOD
+def compute_bollinger_bandwidth(candles: list[dict], period: int | None = None) -> tuple[float, float]:
     """Bollinger Bandwidth - measures volatility spread.
     High bandwidth = high volatility, Low bandwidth = squeeze."""
+    if period is None:
+        period = BB_PERIOD
     if len(candles) < period:
         return 0.0, 0.5
 
@@ -228,13 +236,16 @@ def compute_bollinger_bandwidth(candles, period=None):
     return bandwidth, max(0, min(1, position))
 
 
-def compute_macd(candles, fast=None, slow=None, signal_period=None):
-    if fast is None:
-        fast = MACD_FAST
-    if slow is None:
-        slow = MACD_SLOW
-    if signal_period is None:
-        signal_period = MACD_SIGNAL
+def _ema_list(values: list[float], period: int) -> list[float]:
+    """Compute EMA (Exponential Moving Average) for a list of values."""
+    k = 2 / (period + 1)
+    result = [values[0]]
+    for v in values[1:]:
+        result.append(v * k + result[-1] * (1 - k))
+    return result
+
+
+def compute_macd(candles: list[dict], fast: int | None = None, slow: int | None = None, signal_period: int | None = None) -> tuple[float, float, float, float]:
     """MACD optimized for 1-min scalping (fast periods for quick signals).
 
     Returns:
@@ -243,17 +254,15 @@ def compute_macd(candles, fast=None, slow=None, signal_period=None):
         histogram: MACD - signal
         hist_delta: change in histogram (momentum acceleration)
     """
+    if fast is None:
+        fast = MACD_FAST
+    if slow is None:
+        slow = MACD_SLOW
+    if signal_period is None:
+        signal_period = MACD_SIGNAL
     closes = [c['close'] for c in candles]
     if len(closes) < slow + signal_period:
         return 0.0, 0.0, 0.0, 0.0
-
-    # EMA helper
-    def _ema_list(values, period):
-        k = 2 / (period + 1)
-        result = [values[0]]
-        for v in values[1:]:
-            result.append(v * k + result[-1] * (1 - k))
-        return result
 
     fast_ema = _ema_list(closes, fast)
     slow_ema = _ema_list(closes, slow)
@@ -278,7 +287,7 @@ def compute_macd(candles, fast=None, slow=None, signal_period=None):
     return macd_line, signal_line, histogram, hist_delta
 
 
-def compute_vwap(candles):
+def compute_vwap(candles: list[dict]) -> tuple[float, float, float]:
     """VWAP (Volume Weighted Average Price).
 
     Returns:
@@ -317,11 +326,7 @@ def compute_vwap(candles):
     return vwap, price_vs_vwap, vwap_slope
 
 
-def compute_bollinger(candles, period=None, num_std=None):
-    if period is None:
-        period = BB_PERIOD
-    if num_std is None:
-        num_std = BB_STD
+def compute_bollinger(candles: list[dict], period: int | None = None, num_std: int | None = None) -> tuple[float, float, float, float, float, bool]:
     """Bollinger Bands with position and squeeze detection.
 
     Returns:
@@ -332,6 +337,10 @@ def compute_bollinger(candles, period=None, num_std=None):
         position: current price position within bands (0=lower, 1=upper)
         squeeze: True if bandwidth is historically narrow
     """
+    if period is None:
+        period = BB_PERIOD
+    if num_std is None:
+        num_std = BB_STD
     if len(candles) < period:
         price = candles[-1]['close'] if candles else 0
         return price, price, price, 0.0, 0.5, False
@@ -364,7 +373,7 @@ def compute_bollinger(candles, period=None, num_std=None):
     return upper, middle, lower, bandwidth, position, squeeze
 
 
-def detect_regime(candles):
+def detect_regime(candles: list[dict]) -> tuple[str, float]:
     """Detect market regime: TREND_UP, TREND_DOWN, RANGE, or CHOP.
 
     Based on:
@@ -413,7 +422,7 @@ def detect_regime(candles):
         return "RANGE", adx
 
 
-def get_full_analysis(candles=None, symbol="BTCUSDT"):
+def get_full_analysis(candles: list[dict] | None = None, symbol: str = "BTCUSDT") -> tuple[str, float, dict]:
     """Returns full analysis with all indicators.
 
     Args:
@@ -461,7 +470,7 @@ def get_full_analysis(candles=None, symbol="BTCUSDT"):
     return direction, confidence, details
 
 
-def analyze_trend(candles):
+def analyze_trend(candles: list[dict]) -> tuple[str, float, dict]:
     """
     Analyzes short-term trend based on candles.
 
@@ -551,7 +560,7 @@ def analyze_trend(candles):
         return "neutral", abs(score), details
 
 
-def get_btc_trend(symbol="BTCUSDT"):
+def get_btc_trend(symbol: str = "BTCUSDT") -> tuple[str, float, dict]:
     """
     Main function: fetches klines and returns trend analysis.
 

@@ -4,12 +4,17 @@ Logging module for Polymarket Scalp Radar.
 Writes signal snapshots, trade events, and session summaries to CSV files.
 """
 
+from __future__ import annotations
+
 import csv
+import logging
 import os
 import time
 from datetime import datetime
 
-LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
+logger = logging.getLogger(__name__)
+
+LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
 
 SIGNAL_COLUMNS = [
     "timestamp", "btc_price", "up_buy", "down_buy",
@@ -78,15 +83,14 @@ class RadarLogger:
             if f:
                 try:
                     f.close()
-                except Exception:
-                    pass
+                except OSError as e:
+                    logger.debug("Error closing log file: %s", e)
         self._signal_file = None
         self._trade_file = None
         self._signal_writer = None
         self._trade_writer = None
 
-    def log_signal(self, btc_price, up_buy, down_buy, signal, binance_data,
-                   regime="", phase=""):
+    def log_signal(self, btc_price: float, up_buy: float, down_buy: float, signal: dict | None, binance_data: dict, regime: str = "", phase: str = "") -> None:
         """Log one signal snapshot (called every radar cycle ~2s)."""
         try:
             self._ensure_files()
@@ -119,11 +123,10 @@ class RadarLogger:
             # Flush every 10 rows for performance
             if self._signal_count % 10 == 0:
                 self._signal_file.flush()
-        except Exception:
-            pass
+        except (OSError, csv.Error) as e:
+            logger.debug("Error writing signal log: %s", e)
 
-    def log_trade(self, action, direction, shares, price, amount_usd,
-                  reason, pnl=0.0, session_pnl=0.0):
+    def log_trade(self, action: str, direction: str, shares: float, price: float, amount_usd: float, reason: str, pnl: float = 0.0, session_pnl: float = 0.0) -> None:
         """Log a trade event (BUY, SELL, CLOSE)."""
         try:
             self._ensure_files()
@@ -134,10 +137,10 @@ class RadarLogger:
             ]
             self._trade_writer.writerow(row)
             self._trade_file.flush()
-        except Exception:
-            pass
+        except (OSError, csv.Error) as e:
+            logger.debug("Error writing trade log: %s", e)
 
-    def log_session_summary(self, stats):
+    def log_session_summary(self, stats: dict) -> None:
         """Append session summary to sessions.csv."""
         try:
             path = os.path.join(LOGS_DIR, "sessions.csv")
@@ -161,9 +164,9 @@ class RadarLogger:
                     f"{stats.get('profit_factor', 0):.2f}",
                     f"{stats.get('max_drawdown', 0):.2f}",
                 ])
-        except Exception:
-            pass
+        except (OSError, csv.Error) as e:
+            logger.debug("Error writing session summary: %s", e)
 
-    def close(self):
+    def close(self) -> None:
         """Close all open files."""
         self._close_files()

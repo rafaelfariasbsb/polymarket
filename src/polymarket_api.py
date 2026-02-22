@@ -3,7 +3,10 @@
 Shared functions for Polymarket connection and operations
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone, timedelta
@@ -19,6 +22,9 @@ from py_clob_client.clob_types import (
     OpenOrderParams,
 )
 from py_clob_client.constants import POLYGON
+from market_config import MarketConfig
+
+logger = logging.getLogger(__name__)
 
 GAMMA = "https://gamma-api.polymarket.com"
 CLOB = "https://clob.polymarket.com"
@@ -37,7 +43,7 @@ ET = timezone(timedelta(hours=-5))
 BRASILIA = timezone(timedelta(hours=-3))
 
 
-def load_config():
+def load_config() -> tuple[str, float]:
     """Loads .env and returns configuration"""
     load_dotenv()
     private_key = os.getenv("POLYMARKET_API_KEY")
@@ -49,7 +55,7 @@ def load_config():
     return private_key, limit
 
 
-def derive_proxy_address(eoa_address):
+def derive_proxy_address(eoa_address: str) -> str:
     """Derives proxy wallet address via CREATE2 (Polymarket factory)"""
     eoa_bytes = bytes.fromhex(eoa_address.lower().replace("0x", ""))
     salt = Web3.keccak(eoa_bytes)
@@ -62,7 +68,7 @@ def derive_proxy_address(eoa_address):
     return Web3.to_checksum_address(proxy)
 
 
-def create_client():
+def create_client() -> tuple:
     """Creates and authenticates ClobClient (Level 2) with proxy wallet"""
     private_key, limit = load_config()
     key = private_key.replace("0x", "") if private_key.startswith("0x") else private_key
@@ -87,7 +93,7 @@ def create_client():
     return client, limit
 
 
-def get_balance(client):
+def get_balance(client) -> float:
     """Returns available USDC balance (deducting open buy orders)"""
     resp = client.get_balance_allowance(
         params=BalanceAllowanceParams(
@@ -111,8 +117,8 @@ def get_balance(client):
                 if remaining > 0 and price > 0:
                     locked += remaining * price
         total_balance -= locked
-    except Exception:
-        pass
+    except (KeyError, ValueError, TypeError) as e:
+        logger.debug("Error calculating locked balance: %s", e)
 
     return max(total_balance, 0.0)
 
@@ -130,12 +136,13 @@ def coerce_list(maybe_list):
         try:
             v = json.loads(maybe_list)
             return v if isinstance(v, list) else []
-        except Exception:
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug("coerce_list parse error: %s", e)
             return []
     return []
 
 
-def find_current_market(config=None):
+def find_current_market(config=None) -> tuple:
     """
     Finds the active updown market for the configured asset and window.
     Args:
@@ -143,15 +150,13 @@ def find_current_market(config=None):
     Returns (event, market, token_up, token_down, time_to_close_min)
     """
     if config is None:
-        from market_config import MarketConfig
         config = MarketConfig()
 
     window_min = config.window_min
     window_sec = config.window_seconds
     slug_prefix = config.slug_prefix
 
-    now_local = datetime.now()
-    now_brasilia = now_local.replace(tzinfo=BRASILIA)
+    now_brasilia = datetime.now(BRASILIA)
     now_et = now_brasilia.astimezone(ET)
 
     minute = now_et.minute
@@ -165,7 +170,7 @@ def find_current_market(config=None):
     possible_timestamps = [rounded, target_timestamp, rounded - window_sec, rounded + window_sec]
 
     event = None
-    for ts in possible_timestamps:
+    for i, ts in enumerate(possible_timestamps):
         slug = f"{slug_prefix}-{ts}"
         try:
             r = _session.get(f"{GAMMA}/events", params={"slug": slug}, timeout=10)
@@ -179,7 +184,9 @@ def find_current_market(config=None):
                     if diff < 120:
                         event = ev
                         break
-        except Exception:
+        except (requests.RequestException, KeyError, ValueError) as e:
+            logger.debug("Market slug lookup error (attempt %d): %s", i + 1, e)
+            time.sleep(min(0.2 * (2 ** i), 2.0))  # exponential backoff: 0.2, 0.4, 0.8, 1.6
             continue
 
     if not event:
@@ -210,7 +217,7 @@ def find_current_market(config=None):
     return event, market, token_up, token_down, time_remaining
 
 
-def get_token_position(client, token_id):
+def get_token_position(client, token_id: str) -> float:
     """Returns share quantity of a conditional token"""
     try:
         resp = client.get_balance_allowance(
@@ -221,11 +228,12 @@ def get_token_position(client, token_id):
             )
         )
         return float(resp.get("balance", 0)) / 1e6
-    except Exception:
+    except (KeyError, ValueError, TypeError) as e:
+        logger.debug("Error getting token position: %s", e)
         return 0.0
 
 
-def get_open_orders_value(client, token_id):
+def get_open_orders_value(client, token_id: str) -> float:
     """Returns total USD value of open orders for a token"""
     total = 0.0
     try:
@@ -238,12 +246,12 @@ def get_open_orders_value(client, token_id):
             remaining = size - size_matched
             if remaining > 0 and price > 0:
                 total += remaining * price
-    except Exception:
-        pass
+    except (KeyError, ValueError, TypeError) as e:
+        logger.debug("Error calculating open orders: %s", e)
     return total
 
 
-def check_limit(client, token_up, token_down, new_order_value):
+def check_limit(client, token_up: str, token_down: str, new_order_value: float) -> tuple[bool, float, float]:
     """
     Checks if the new order exceeds POSITION_LIMIT.
     Returns (can_trade, current_exposure, limit)
@@ -263,7 +271,8 @@ def check_limit(client, token_up, token_down, new_order_value):
                 timeout=10,
             ).json()["price"]
         )
-    except Exception:
+    except (requests.RequestException, KeyError, ValueError) as e:
+        logger.debug("Error fetching price: %s", e)
         up_price = 0.0
 
     try:
@@ -274,7 +283,8 @@ def check_limit(client, token_up, token_down, new_order_value):
                 timeout=10,
             ).json()["price"]
         )
-    except Exception:
+    except (requests.RequestException, KeyError, ValueError) as e:
+        logger.debug("Error fetching price: %s", e)
         down_price = 0.0
 
     position_value = (up_shares * up_price) + (down_shares * down_price)
@@ -289,7 +299,7 @@ def check_limit(client, token_up, token_down, new_order_value):
     return can_trade, current_exposure, limit
 
 
-def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None, quiet=False):
+def monitor_order(client, order_id: str, interval: int = 3, timeout_sec: int = 300, cancel_fn=None, quiet: bool = False) -> tuple[str, dict | None]:
     """
     Monitors an order until filled, cancelled, or timeout.
     cancel_fn: callable that returns True to cancel the order (e.g. ESC pressed)
@@ -306,8 +316,8 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None,
                 print(f"\n   Cancelling order (ESC)...")
             try:
                 client.cancel(order_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Error cancelling order: %s", e)
             return "CANCELLED", None
 
         elapsed = time.time() - start
@@ -316,8 +326,8 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None,
                 print(f"\n   Timeout ({timeout_sec}s) reached. Cancelling order...")
             try:
                 client.cancel(order_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Error cancelling timed-out order: %s", e)
             return "TIMEOUT", None
 
         try:
@@ -350,8 +360,8 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None,
                 try:
                     order = client.get_order(order_id)
                     size_matched = float(order.get("size_matched", 0)) if isinstance(order, dict) else 0
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Error re-querying order %s: %s", order_id[:8], e)
             if not quiet:
                 print()
             return "FILLED", order

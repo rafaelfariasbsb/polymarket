@@ -4,8 +4,10 @@ Binance WebSocket client for real-time BTC/USDT kline data.
 Maintains a candle buffer in memory with auto-reconnect.
 Falls back to HTTP polling if WebSocket is unavailable.
 """
+from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 
@@ -17,6 +19,7 @@ except ImportError:
 
 from binance_api import get_klines
 
+logger = logging.getLogger(__name__)
 
 MAX_CANDLES = 30
 RECONNECT_DELAY_BASE = 2
@@ -69,17 +72,18 @@ class BinanceWS:
         if self._connected:
             return f"WS (msgs:{self._msg_count})"
         # Thread died unexpectedly — restart it
-        if self._thread and not self._thread.is_alive():
-            self._thread = threading.Thread(target=self._run_loop, daemon=True)
-            self._thread.start()
-            return "RESTART"
+        with self._lock:
+            if self._thread and not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run_loop, daemon=True)
+                self._thread.start()
+                return "RESTART"
         if self._last_error:
             return f"ERR: {self._last_error[:50]}"
         if self._connect_count > 0:
             return f"RECONN #{self._connect_count}"
         return "CONNECTING"
 
-    def start(self):
+    def start(self) -> bool:
         """Start WebSocket connection in background thread."""
         if not HAS_WS:
             return False
@@ -92,17 +96,17 @@ class BinanceWS:
         self._thread.start()
         return True
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop WebSocket connection."""
         self._running = False
         self._connected = False
         if self._ws:
             try:
                 self._ws.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("WS close error: %s", e)
 
-    def get_candles(self, limit=20):
+    def get_candles(self, limit: int = 20) -> tuple[list[dict], str]:
         """Get candles from WS buffer. Falls back to HTTP if WS has no data.
 
         Returns:
@@ -129,7 +133,8 @@ class BinanceWS:
                     self._current = candles[-1]
                 self._last_update = time.time()
             return candles, 'http'
-        except Exception:
+        except Exception as e:
+            logger.debug("WS HTTP fallback error: %s", e)
             # Return whatever we have
             if all_candles:
                 return all_candles[-limit:], 'ws'
@@ -145,15 +150,16 @@ class BinanceWS:
                     self._candles = candles[:-1]
                     self._current = candles[-1]
                     self._last_update = time.time()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("WS initial seed error: %s", e)
 
         while self._running:
             url = self._ws_endpoints[self._endpoint_idx % len(self._ws_endpoints)]
             try:
                 self._connect(url)
-            except Exception:
-                pass
+            except Exception as e:
+                self._last_error = str(e)[:100]
+                logger.debug("WS connect error: %s", e)
 
             if not self._running:
                 break
@@ -230,5 +236,5 @@ class BinanceWS:
                 self._last_update = time.time()
                 self._msg_count += 1
 
-        except Exception:
-            pass
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            logger.debug("WS message parse error: %s", e)
