@@ -882,7 +882,7 @@ def execute_close_market(client, token_up, token_down):
                 resp = client.post_order(order, orderType=OrderType.GTC)
                 order_id = resp.get("orderID") or resp.get("id") if isinstance(resp, dict) else None
                 if order_id:
-                    status, details = monitor_order(client, order_id, interval=1, timeout_sec=15)
+                    status, details = monitor_order(client, order_id, interval=1, timeout_sec=15, quiet=True)
                     if status == "FILLED":
                         sm = float(details.get("size_matched", 0)) if details else 0
                         p = float(details.get("price", 0)) if details else market_price
@@ -1162,10 +1162,16 @@ def main():
                         'bb_squeeze': details.get('bb_squeeze', False),
                     }
                     current_regime = details.get('regime', 'RANGE')
-                except Exception:
-                    key = sleep_with_key(2)
-                    if key:
-                        pass
+                except Exception as e:
+                    now_str = datetime.now().strftime("%H:%M:%S")
+                    print(f"   {D}{now_str}{X} │ {Y}Binance data error: {e}{X}")
+                    draw_panel(now_str, balance, 0, '─', 0, {'rsi': 50, 'score': 0},
+                               market_slug, current_time, 0, 0, positions, None, trade_amount,
+                               session_pnl=session_pnl, trade_count=trade_count,
+                               status_msg=f"{Y}Binance error — retrying...{X}",
+                               price_to_beat=price_to_beat, trade_history=trade_history,
+                               last_action=last_action)
+                    sleep_with_key(2)
                     continue
 
                 fut_up = _executor.submit(get_price, token_up, "BUY")
@@ -1173,6 +1179,17 @@ def main():
                 up_buy = fut_up.result()
                 down_buy = fut_dn.result()
                 if up_buy <= 0:
+                    now_str = datetime.now().strftime("%H:%M:%S")
+                    print(f"   {D}{now_str}{X} │ {Y}Token price unavailable (UP=${up_buy:.2f} DN=${down_buy:.2f}) — retrying...{X}")
+                    draw_panel(now_str, balance, btc_price, bin_direction, confidence,
+                               binance_data, market_slug, current_time, up_buy,
+                               down_buy, positions, None, trade_amount,
+                               session_pnl=session_pnl, trade_count=trade_count,
+                               regime=current_regime, data_source=data_source,
+                               status_msg=f"{Y}Token prices unavailable — retrying...{X}",
+                               ws_status=binance_ws.status,
+                               price_to_beat=price_to_beat, trade_history=trade_history,
+                               last_action=last_action)
                     sleep_with_key(2)
                     continue
 
@@ -1209,6 +1226,10 @@ def main():
                 sug = current_signal.get('suggestion')
                 trend = current_signal.get('trend', 0)
                 sr_raw = current_signal.get('sr_raw', 0)
+                sr_adj = current_signal.get('sr_adj', 0)
+                if s_dir == 'UP': color, sym = G, '▲'
+                elif s_dir == 'DOWN': color, sym = R, '▼'
+                else: color, sym = D, '─'
 
                 print(format_scrolling_line(now_str, btc_price, up_buy, down_buy,
                                             current_signal, positions, current_regime))
