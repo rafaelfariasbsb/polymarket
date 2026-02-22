@@ -43,6 +43,9 @@ class BinanceWS:
         self._reconnect_count = 0
         self._last_update = 0
         self._endpoint_idx = 0
+        self._last_error = ""
+        self._msg_count = 0
+        self._connect_count = 0
 
     @property
     def is_connected(self):
@@ -51,6 +54,24 @@ class BinanceWS:
     @property
     def last_update(self):
         return self._last_update
+
+    @property
+    def status(self):
+        """Diagnostic status string."""
+        if not self._running:
+            return "OFF:no-ws" if not HAS_WS else "OFF:stopped"
+        if self._connected:
+            return f"WS (msgs:{self._msg_count})"
+        # Thread died unexpectedly — restart it
+        if self._thread and not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
+            return "RESTART"
+        if self._last_error:
+            return f"ERR: {self._last_error[:50]}"
+        if self._connect_count > 0:
+            return f"RECONN #{self._connect_count}"
+        return "CONNECTING"
 
     def start(self):
         """Start WebSocket connection in background thread."""
@@ -88,19 +109,19 @@ class BinanceWS:
             if self._current:
                 all_candles.append(self._current)
 
-        # Use WS data if we have enough candles and data is fresh (< 10s old)
-        if len(all_candles) >= 5 and (time.time() - self._last_update) < 10:
+        # Use WS data if connected and we have enough candles
+        if self._connected and len(all_candles) >= 5 and (time.time() - self._last_update) < 10:
             return all_candles[-limit:], 'ws'
 
         # Fallback to HTTP
         try:
             candles = get_klines(interval="1m", limit=limit)
-            # Seed the buffer with HTTP data if empty
-            if not self._candles:
-                with self._lock:
-                    self._candles = candles[:-1]  # all except last (still forming)
-                    if candles:
-                        self._current = candles[-1]
+            # Always refresh buffer with HTTP data (keeps buffer fresh for WS recovery)
+            with self._lock:
+                self._candles = candles[:-1]  # all except last (still forming)
+                if candles:
+                    self._current = candles[-1]
+                self._last_update = time.time()
             return candles, 'http'
         except Exception:
             # Return whatever we have
@@ -157,12 +178,17 @@ class BinanceWS:
     def _on_open(self, ws):
         self._connected = True
         self._reconnect_count = 0
+        self._connect_count += 1
+        self._last_error = ""
 
     def _on_close(self, ws, close_status_code, close_msg):
         self._connected = False
+        if close_status_code:
+            self._last_error = f"closed:{close_status_code}"
 
     def _on_error(self, ws, error):
         self._connected = False
+        self._last_error = str(error)[:100]
 
     def _on_message(self, ws, message):
         """Process incoming kline message."""
@@ -196,6 +222,7 @@ class BinanceWS:
                     self._current = candle
 
                 self._last_update = time.time()
+                self._msg_count += 1
 
         except Exception:
             pass

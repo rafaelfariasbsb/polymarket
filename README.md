@@ -1,35 +1,38 @@
 # Polymarket BTC Scalping Radar
 
-Real-time scalping radar for Polymarket BTC 15-minute Up/Down markets, powered by Binance price data and a custom trend-following signal engine with market regime detection.
+Real-time scalping radar for Polymarket BTC 15-minute Up/Down markets, powered by Binance price data via WebSocket and a 6-component signal engine with market regime detection.
 
 ## Overview
 
-This tool monitors BTC price on Binance and cross-references it with Polymarket's BTC 15-minute prediction markets. It generates trade signals based on momentum, divergence, support/resistance, volatility, and market regime analysis, displayed in a split-screen terminal UI with manual hotkey trading.
+This tool monitors BTC price on Binance (WebSocket + HTTP fallback) and cross-references it with Polymarket's BTC 15-minute prediction markets. It generates trade signals based on 6 weighted components — momentum, divergence, support/resistance, MACD, VWAP, and Bollinger Bands — displayed in a split-screen terminal UI with manual hotkey trading.
 
 ## Features
 
-- **Cross-platform** — Runs on Linux, macOS, and Windows 10+
+- **Real-time data** — Binance WebSocket for sub-second BTC price updates (HTTP fallback)
+- **6-component signal engine** — RSI, MACD, VWAP, Bollinger Bands, divergence, S/R levels
+- **Market regime detection** — Classifies market as TREND_UP, TREND_DOWN, RANGE, or CHOP via ADX
+- **Phase-aware trading** — Adjusts signal thresholds based on time remaining (EARLY/MID/LATE/CLOSING)
 - **Split-screen terminal UI** — Static panel (top) with live stats + scrolling log (bottom)
-- **Real-time signal engine** — Trend-following with EMA filter, RSI, divergence detection, S/R levels
-- **Market regime detection** — Classifies market as TREND_UP, TREND_DOWN, RANGE, or CHOP to adapt signals
-- **Phase-aware trading** — Adjusts signal thresholds based on time remaining in 15-min window (EARLY/MID/LATE/CLOSING)
+- **Cross-platform** — Runs on Linux, macOS, and Windows 10+
 - **Manual hotkey trading** — Press U/D/C/S/Q to buy UP, buy DOWN, close all, accept a signal, or exit
 - **TP/SL monitoring** — Visual progress bar tracking take-profit and stop-loss levels
-- **Price alerts** — Audio beep when prices cross configurable thresholds (edge-triggered, beeps once)
+- **Price alerts** — Audio beep when prices cross configurable thresholds (edge-triggered)
 - **Market auto-discovery** — Automatically finds the active BTC 15-minute market window
 - **CSV logging** — Signals, trades, and session summaries logged to `logs/` for analysis
 - **Session stats** — Win rate, P&L, profit factor, and max drawdown displayed on exit
+- **Fully configurable** — 27 parameters via `.env` (indicators, weights, thresholds, regime)
 
 ## Project Structure
 
 ```
 polymarket/
-├── radar_scalp.py        Main radar script (UI, signals, trading)
-├── binance_api.py        Binance public API (price, candles, RSI, ATR, ADX, regime)
+├── radar_poly.py        Main radar script (UI, signals, trading)
+├── binance_api.py        Binance API (price, candles, RSI, MACD, VWAP, BB, ADX, regime)
+├── ws_binance.py         Binance WebSocket client (real-time klines, auto-reconnect)
 ├── polymarket_api.py     Polymarket CLOB API (auth, orders, positions)
 ├── logger.py             CSV logging (signals, trades, session summaries)
 ├── .env                  Configuration - YOU CREATE THIS (see below)
-├── .env.example          Example config template
+├── .env.example          Example config template (27 parameters)
 ├── requirements.txt      Python dependencies
 ├── setup.sh              Setup script for Linux / macOS
 ├── setup.bat             Setup script for Windows
@@ -105,11 +108,27 @@ copy .env.example .env
 
 > The setup scripts (`setup.sh` / `setup.bat`) do this automatically if `.env` doesn't exist.
 
-### Step 2: Edit `.env` with your credentials
+### Step 2: Export your Polymarket private key
 
-Open `.env` in any text editor and replace `0xYOUR_PRIVATE_KEY_HERE` with your actual private key exported from Polymarket.
+To use the radar, you need to export your private key from Polymarket:
+
+1. Log in to your Polymarket account in the browser
+2. Open a new tab and go to: **https://reveal.magic.link/polymarket**
+3. Sign in with the same email/Google used on Polymarket
+4. Your private key will be displayed — copy it (starts with `0x...`)
+5. Log out of Magic.Link after copying
+
+> **Security:** Never share your private key with anyone. Polymarket will never ask for it. After pasting in `.env`, copy a random text to clear your clipboard.
+
+> **Note:** This method works for accounts created via email (Magic.Link). If you use a different wallet provider, export the key from that wallet directly.
+
+### Step 3: Edit `.env` with your credentials
+
+Open `.env` in any text editor and replace `0xYOUR_PRIVATE_KEY_HERE` with the private key you exported:
 
 ### Available settings
+
+#### Credentials & Trading
 
 | Variable | Description | Default |
 |---|---|---|
@@ -119,6 +138,47 @@ Open `.env` in any text editor and replace `0xYOUR_PRIVATE_KEY_HERE` with your a
 | `PRICE_ALERT` | Price threshold that triggers audio alert | 0.80 |
 | `SIGNAL_STRENGTH_BEEP` | Min signal strength (0-100) to trigger opportunity beep | 50 |
 
+#### Indicator Periods
+
+| Variable | Description | Default |
+|---|---|---|
+| `RSI_PERIOD` | RSI period (lower = more reactive) | 7 |
+| `MACD_FAST` | MACD fast EMA period | 5 |
+| `MACD_SLOW` | MACD slow EMA period | 10 |
+| `MACD_SIGNAL` | MACD signal line period | 4 |
+| `BB_PERIOD` | Bollinger Bands lookback period | 14 |
+| `BB_STD` | Bollinger Bands standard deviations | 2 |
+| `ADX_PERIOD` | ADX period (trend strength) | 7 |
+
+#### Signal Weights (must sum to ~1.0)
+
+| Variable | Component | Default |
+|---|---|---|
+| `W_MOMENTUM` | BTC Momentum (RSI + candle score) | 0.30 |
+| `W_DIVERGENCE` | Divergence (BTC price vs Polymarket price) | 0.20 |
+| `W_SUPPORT_RESISTANCE` | Support/Resistance levels | 0.10 |
+| `W_MACD` | MACD histogram delta (momentum acceleration) | 0.15 |
+| `W_VWAP` | VWAP position + slope | 0.15 |
+| `W_BOLLINGER` | Bollinger Bands position | 0.10 |
+
+#### Volatility & Regime
+
+| Variable | Description | Default |
+|---|---|---|
+| `VOL_THRESHOLD` | ATR/price ratio to flag high volatility (0.03 = 3%) | 0.03 |
+| `VOL_AMPLIFIER` | Score multiplier when high volatility detected | 1.3 |
+| `REGIME_CHOP_MULT` | CHOP regime: dampen signal (0.5 = -50%) | 0.50 |
+| `REGIME_TREND_BOOST` | Trend-aligned: boost signal (1.15 = +15%) | 1.15 |
+| `REGIME_COUNTER_MULT` | Counter-trend: reduce signal (0.7 = -30%) | 0.70 |
+
+#### Phase Thresholds
+
+| Variable | Phase | Default |
+|---|---|---|
+| `PHASE_EARLY_THRESHOLD` | EARLY (>10 min left): conservative | 50 |
+| `PHASE_MID_THRESHOLD` | MID (5-10 min left): normal | 30 |
+| `PHASE_LATE_THRESHOLD` | LATE (1-5 min left): very selective | 70 |
+
 ## Usage
 
 ```bash
@@ -127,10 +187,10 @@ source venv/bin/activate        # Linux/macOS
 venv\Scripts\activate.bat       # Windows
 
 # Run with default trade amount ($4 from .env)
-python radar_scalp.py
+python radar_poly.py
 
 # Run with custom trade amount
-python radar_scalp.py 10        # $10 per trade
+python radar_poly.py 10        # $10 per trade
 ```
 
 ### Hotkeys
@@ -146,53 +206,124 @@ python radar_scalp.py 10        # $10 per trade
 ### Screen Layout
 
 ```
- ════════════════════════════════════════════════════════════════════════════════
+ ════════════════════════════════════════════════════════════════════════════════════════
  SCALP RADAR │ 14:32:15 │ Balance: $52.30 │ Trade: $4
- ════════════════════════════════════════════════════════════════════════════════
- BINANCE │ BTC: $98,432.50 │ UP (score:+0.35 conf:70%) │ RSI:42 │ Vol:normal │ TREND▲
+ ════════════════════════════════════════════════════════════════════════════════════════
+ BINANCE │ BTC: $98,432.50 │ UP (score:+0.35 conf:70%) │ RSI:42 │ Vol:normal │ TREND▲ │ WS
  MARKET  │ btc-updown-15m-1740000 │ Closes in: 8.2min │ MID
  POLY    │ UP: $0.52/$0.55 (52%) │ DOWN: $0.45/$0.48 (45%)
  POSITION│ None │ P&L: +$0.00 (0 trades)
- SIGNAL  │ ▲ UP      62% [██████░░░░] │ RSI:42↑ │ T:+0.4 │ SR:+0.3→+0.2
+ SIGNAL  │ ▲ UP      62% [██████░░░░] │ RSI:42↑ │ T:+0.4 │ MACD:+1.2 │ VW:+0.03 │ BB:45%
  ALERT   │ ─
- ────────────────────────────────────────────────────────────────────────────────
+ ────────────────────────────────────────────────────────────────────────────────────────
  U=buy UP │ D=buy DOWN │ C=close all │ S=accept signal │ Q=exit
- ════════════════════════════════════════════════════════════════════════════════
-   TIME     │          BTC │       UP       DN │    RSI │    SIGNAL  ─  STRENGTH │ VOL  │   TREND │           S/R │ RG
+ ════════════════════════════════════════════════════════════════════════════════════════
+   TIME     │          BTC │       UP       DN │    RSI │    SIGNAL  ─  STRENGTH │ VOL  │   TREND │   MACD │   VWAP │   BB │           S/R │ RG
 
-   14:32:15 │ BTC:$ 98,432 │ UP:$0.52 DN:$0.45 │ RSI:42↑ │ ▲ UP  62% [██████░░░░] │ VOL↑ │ T:+0.4⬆ │ SR:+0.3→+0.2 │ T▲
-   14:32:17 │ BTC:$ 98,445 │ UP:$0.53 DN:$0.44 │ RSI:43↑ │ ▲ UP  65% [██████░░░░] │      │ T:+0.5⬆ │ SR:+0.2→+0.1 │ T▲
+   14:32:15 │ BTC:$ 98,432 │ UP:$0.52 DN:$0.45 │ RSI:42↑ │ ▲ UP  62% [██████░░░░] │ VOL↑ │ T:+0.4⬆ │  +1.2▲ │ +0.03↑ │ MD45% │ SR:+0.3→+0.2 │ T▲
+   14:32:16 │ BTC:$ 98,445 │ UP:$0.53 DN:$0.44 │ RSI:43↑ │ ▲ UP  65% [██████░░░░] │      │ T:+0.5⬆ │  +1.5▲ │ +0.04↑ │ MD48% │ SR:+0.2→+0.1 │ T▲
 ```
+
+## Color Coding
+
+All indicators use color to show their current state at a glance:
+
+| Indicator | Green | Red | Gray |
+|-----------|-------|-----|------|
+| **RSI** | < 40 (oversold / bullish) | > 60 (overbought / bearish) | 40-60 (neutral) |
+| **Trend** | Positive (bullish) | Negative (bearish) | Near zero |
+| **MACD** | Histogram > 0 (bullish momentum) | Histogram < 0 (bearish momentum) | Near zero |
+| **VWAP** | Price above VWAP (bullish) | Price below VWAP (bearish) | At VWAP |
+| **Bollinger** | < 20% (near lower band / oversold) | > 80% (near upper band / overbought) | 20-80% (mid-band) |
+| **S/R** | Positive (support zone) | Negative (resistance zone) | Neutral |
+| **Regime** | TREND UP | TREND DOWN | RANGE / CHOP |
+| **Signal** | UP direction | DOWN direction | NEUTRAL |
+
+These colors apply both to the **static panel** (SIGNAL line) and to the **scrolling log** columns.
 
 ## Signal Engine
 
-The signal is computed from 4 components with an EMA trend filter and regime-aware adjustments:
+The signal is computed from 6 weighted components with an EMA trend filter, regime-aware adjustments, and volatility amplification. All weights and parameters are configurable via `.env`.
 
 ### Components
 
-| Component | Weight | Description |
-|-----------|--------|-------------|
-| **BTC Momentum** | 40% | RSI (7-period) + Binance candle score |
-| **Divergence** | 30% | BTC price vs Polymarket price divergence |
-| **Support/Resistance** | 15% | Position within recent price range (with trend filter) |
-| **Volatility** | Amplifier (1.3x) | ATR-based, boosts signal in high-volatility conditions |
+| # | Component | Weight | Indicator | Description |
+|---|-----------|--------|-----------|-------------|
+| 1 | **BTC Momentum** | 30% | RSI + candle score | RSI oversold/overbought zones combined with Binance candle pattern scoring (green/red ratio, volume, momentum) |
+| 2 | **Divergence** | 20% | BTC vs Polymarket | Detects when BTC price moves but Polymarket hasn't caught up yet (leading signal) |
+| 3 | **Support/Resistance** | 10% | Price range position | Position within recent UP price range. Filtered by EMA trend to prevent false mean-reversion |
+| 4 | **MACD** | 15% | Histogram delta | Measures momentum acceleration. Positive histogram delta = bullish acceleration. Boosted when histogram and delta agree |
+| 5 | **VWAP** | 15% | Position + slope | Price above VWAP = bullish, below = bearish. VWAP slope adds directional confirmation |
+| 6 | **Bollinger Bands** | 10% | Band position | Price near lower band = oversold (UP), near upper = overbought (DOWN). Squeeze detection amplifies breakout signals |
+
+### Indicators in Detail
+
+#### RSI (Relative Strength Index)
+
+- **Period**: 7 (configurable via `RSI_PERIOD`)
+- Measures momentum on a 0-100 scale
+- Below 25 = strong oversold (bullish), above 75 = strong overbought (bearish)
+- Short period (7) provides faster signals for scalping vs traditional 14-period
+
+#### MACD (Moving Average Convergence Divergence)
+
+- **Periods**: Fast=5, Slow=10, Signal=4 (configurable via `MACD_FAST`, `MACD_SLOW`, `MACD_SIGNAL`)
+- Optimized for 1-minute candles (shorter periods than traditional 12/26/9)
+- **MACD line** = Fast EMA - Slow EMA
+- **Signal line** = EMA of MACD line
+- **Histogram** = MACD - Signal (positive = bullish momentum)
+- **Histogram delta** = change in histogram (acceleration/deceleration)
+- Signal logic: strong delta (>0.5) = full score, moderate delta (>0.1) = half score
+- Boosted 1.2x when histogram and delta agree in direction
+
+#### VWAP (Volume Weighted Average Price)
+
+- Cumulative volume-weighted price since first candle in window
+- **Price vs VWAP**: above = bullish (+0.5), below = bearish (-0.5)
+- **VWAP slope**: upward slope = bullish (+0.5), downward = bearish (-0.5)
+- Slope computed from last 5 VWAP values, normalized to -1.0 to +1.0
+- Combined score clamped to [-1.0, +1.0]
+
+#### Bollinger Bands
+
+- **Period**: 14, **Std Dev**: 2 (configurable via `BB_PERIOD`, `BB_STD`)
+- **Position**: 0% = at lower band (oversold), 100% = at upper band (overbought)
+- Below 15% = strong buy signal (+0.8), above 85% = strong sell signal (-0.8)
+- **Squeeze detection**: when current bandwidth < 50% of previous period bandwidth
+- Squeeze amplifies signal 1.5x (breakout anticipation)
+
+#### ADX (Average Directional Index)
+
+- **Period**: 7 (configurable via `ADX_PERIOD`)
+- Measures trend strength on a 0-100 scale (direction-agnostic)
+- Uses Wilder's smoothing method (SMA for initial, then exponential)
+- ADX > 25 = strong trend, ADX 18-25 = range, ADX < 18 = chop/no direction
+
+#### ATR (Average True Range)
+
+- Measures price volatility (average of true range across all candles)
+- Used as volatility amplifier: when ATR/price > 3%, signal is boosted by 1.3x
+- Does not contribute as a weighted component — acts as a multiplier
 
 ### Trend Filter (EMA)
 
-- EMA(5) vs EMA(12) of Polymarket UP price
-- When trend is strong (>0.3), S/R signals that conflict with the trend are reduced
-- Prevents false mean-reversion signals during strong momentum
+- EMA(5) vs EMA(12) of Polymarket UP price history
+- Computes trend strength from -1.0 (strong down) to +1.0 (strong up)
+- When trend is strong (|strength| > 0.3), S/R signals that conflict with the trend are reduced
+- Prevents false mean-reversion signals during strong momentum moves
 
-### Regime Adjustments
+### Regime Detection
 
-The signal is adjusted based on the current market regime detected via ADX and Bollinger Bands:
+The signal is adjusted based on the current market regime detected via ADX, Bollinger bandwidth, and SMA direction:
 
 | Regime | Condition | Effect |
 |--------|-----------|--------|
-| **TREND_UP** | ADX > 25, price above SMA, majority green candles | +15% boost for UP signals, -30% for DOWN |
-| **TREND_DOWN** | ADX > 25, price below SMA, majority red candles | +15% boost for DOWN signals, -30% for UP |
+| **TREND_UP** | ADX > 25, price above SMA, >=4/7 green candles | Aligned signals boosted +15%, counter signals reduced -30% |
+| **TREND_DOWN** | ADX > 25, price below SMA, <=3/7 green candles | Aligned signals boosted +15%, counter signals reduced -30% |
 | **RANGE** | ADX 18-25, or mixed signals | No adjustment |
 | **CHOP** | ADX < 18, wide Bollinger bands | Signal dampened by 50% |
+
+All multipliers are configurable: `REGIME_CHOP_MULT`, `REGIME_TREND_BOOST`, `REGIME_COUNTER_MULT`.
 
 ### Phase Thresholds
 
@@ -205,11 +336,53 @@ Signal strength threshold varies by time remaining in the 15-minute window:
 | **LATE** | 1-5 min | 70% | Very selective, only very strong signals |
 | **CLOSING** | < 1 min | Blocked | No new trades allowed |
 
+Thresholds are configurable: `PHASE_EARLY_THRESHOLD`, `PHASE_MID_THRESHOLD`, `PHASE_LATE_THRESHOLD`.
+
 ### Signal Output
 
 - **Direction**: UP / DOWN / NEUTRAL
 - **Strength**: 0-100% (minimum varies by phase)
 - **Suggestion**: Entry price, TP (take profit), SL (stop loss)
+
+### Signal Flow
+
+```
+Binance candles (WS/HTTP)
+       │
+       ├─► RSI ──────────────┐
+       ├─► MACD (hist delta) ─┤
+       ├─► VWAP (pos + slope)─┤
+       ├─► Bollinger (pos) ───┤     Weighted Sum     Regime      Phase
+       │                      ├──────────►  score  ──► adjust ──► threshold ──► SIGNAL
+       │   Polymarket prices  │                        (ADX)      (time)
+       ├─► Divergence ────────┤
+       ├─► S/R + trend filter─┘
+       │
+       └─► ATR ── volatility amplifier (1.3x if high vol)
+```
+
+## Data Sources
+
+### Binance (BTC/USDT)
+
+- **Primary**: WebSocket `wss://stream.binance.com:9443/ws/btcusdt@kline_1m` (real-time, ~0ms latency)
+- **Fallback**: REST API `https://api.binance.com/api/v3/klines` (~300ms per call)
+- WebSocket provides 1-minute klines with auto-reconnect and exponential backoff
+- Candle buffer maintained in memory (30 completed + 1 forming)
+- Data source shown in dashboard: `WS` (green) or `HTTP` (gray)
+
+### Polymarket
+
+- REST API via `py-clob-client` for prices, orders, and positions
+- Parallel price fetches for UP and DOWN tokens via ThreadPoolExecutor
+- Market auto-discovery via timestamp-based slug matching
+
+### Update Cycle
+
+| Data Source | Cycle Time | Method |
+|-------------|-----------|--------|
+| With WebSocket | ~0.5s | WS candles + parallel Poly HTTP |
+| HTTP fallback | ~2.0s | Sequential Binance HTTP + parallel Poly HTTP |
 
 ## Logging
 
@@ -217,7 +390,7 @@ All activity is logged to CSV files in the `logs/` directory (auto-created, giti
 
 | File | Content | Frequency |
 |------|---------|-----------|
-| `signals_YYYY-MM-DD.csv` | Every radar cycle snapshot (price, RSI, ATR, signal, regime) | Every ~2s |
+| `signals_YYYY-MM-DD.csv` | Every radar cycle snapshot (price, RSI, ATR, MACD, VWAP, BB, regime) | Every ~0.5-2s |
 | `trades_YYYY-MM-DD.csv` | Trade events (BUY, CLOSE) with P&L | On each trade |
 | `sessions.csv` | Session summaries (duration, win rate, P&L, drawdown) | On exit |
 
@@ -242,10 +415,10 @@ On exit (Q or Ctrl+C), the radar displays a session summary:
 
 ## Files
 
-### `radar_scalp.py`
+### `radar_poly.py`
 Main radar script with split-screen terminal UI. Cross-platform (Linux/macOS/Windows). Handles:
-- Data collection (Binance + Polymarket every 2s)
-- Signal computation with regime and phase awareness
+- Data collection (Binance WS + Polymarket every 0.5s)
+- Signal computation (6 components + regime + phase)
 - Hotkey-based manual trading (U/D/C/S/Q)
 - TP/SL monitoring with visual progress bar
 - Price alerts (edge-triggered audio beeps)
@@ -255,13 +428,25 @@ Main radar script with split-screen terminal UI. Cross-platform (Linux/macOS/Win
 Binance public API wrapper (no authentication needed):
 - `get_btc_price()` — Current BTC/USDT price
 - `get_klines()` — Historical candles (1m default)
-- `compute_rsi()` — Fast RSI (7-period)
-- `compute_atr()` — Average True Range
-- `compute_adx()` — Average Directional Index (trend strength)
-- `compute_bollinger_bandwidth()` — Bollinger Bands width and position
+- `compute_rsi()` — RSI (configurable period, default 7)
+- `compute_atr()` — Average True Range (volatility)
+- `compute_adx()` — Average Directional Index (trend strength, Wilder's smoothing)
+- `compute_macd()` — MACD line, signal line, histogram, histogram delta
+- `compute_vwap()` — VWAP price, position vs VWAP, VWAP slope
+- `compute_bollinger()` — Upper/middle/lower bands, bandwidth, position, squeeze detection
+- `compute_bollinger_bandwidth()` — Simplified bandwidth + position
 - `detect_regime()` — Market regime classification (TREND_UP/DOWN, RANGE, CHOP)
-- `get_full_analysis()` — Combined analysis with trend, RSI, ATR, ADX, regime
-- `analyze_trend()` — Score-based trend analysis
+- `get_full_analysis()` — Combined analysis with all indicators (accepts WS candles)
+- `analyze_trend()` — Score-based candle trend analysis
+
+### `ws_binance.py`
+Binance WebSocket client for real-time BTC/USDT kline data:
+- Auto-reconnect with exponential backoff (2s → 30s max)
+- Dual endpoint failover (`stream.binance.com:9443` and `:443`)
+- Thread-safe candle buffer (completed + live forming candle)
+- Seeds initial data via HTTP on startup
+- Falls back to HTTP polling when WebSocket is unavailable
+- Returns `(candles, source)` where source is `'ws'` or `'http'`
 
 ### `polymarket_api.py`
 Polymarket CLOB API wrapper:
@@ -274,7 +459,7 @@ Polymarket CLOB API wrapper:
 
 ### `logger.py`
 CSV logging module:
-- `RadarLogger.log_signal()` — Logs each radar cycle (every ~2s)
+- `RadarLogger.log_signal()` — Logs each radar cycle (every ~0.5-2s)
 - `RadarLogger.log_trade()` — Logs trade events (BUY, CLOSE)
 - `RadarLogger.log_session_summary()` — Logs session stats on exit
 - Auto-rotates files daily (`signals_YYYY-MM-DD.csv`, `trades_YYYY-MM-DD.csv`)
@@ -282,7 +467,7 @@ CSV logging module:
 ### Setup & config
 - `setup.sh` — Automated setup for Linux/macOS (bash)
 - `setup.bat` — Automated setup for Windows (cmd)
-- `.env.example` — Template configuration file (copy to `.env` and add your private key)
+- `.env.example` — Template configuration file with 27 parameters
 - `requirements.txt` — Python package dependencies
 
 ## Technical Details
@@ -292,10 +477,12 @@ CSV logging module:
 - **Key input (Windows)**: Non-blocking via `msvcrt.kbhit()` + `msvcrt.getch()`
 - **ANSI on Windows**: Enabled with `os.system("")` (Windows 10+)
 - **Output buffering**: `sys.stdout.reconfigure(line_buffering=True)` for real-time display
+- **WebSocket**: `websocket-client` library with `run_forever()`, 30s ping interval
+- **Parallel I/O**: `ThreadPoolExecutor` for concurrent Polymarket price fetches
 - **Price history**: `deque(maxlen=60)` — ~2 minutes of data at 2s polling interval
 - **Market discovery**: Timestamp-based slug matching (`btc-updown-15m-{timestamp}`)
 - **Proxy wallet**: CREATE2 address derivation from Polymarket factory contract
-- **Regime detection**: ADX (Wilder's smoothing) + Bollinger Bandwidth + SMA direction
+- **Regime detection**: ADX (Wilder's smoothing) + Bollinger bandwidth + SMA direction
 - **Log rotation**: Daily CSV files with automatic header creation
 
 ## License

@@ -4,9 +4,22 @@ Functions to query BTC price from Binance and compute trend.
 Uses only public endpoints (no authentication).
 """
 
+import os
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BINANCE_API = "https://api.binance.com/api/v3"
+
+# Configurable indicator periods
+RSI_PERIOD = int(os.getenv('RSI_PERIOD', '7'))
+MACD_FAST = int(os.getenv('MACD_FAST', '5'))
+MACD_SLOW = int(os.getenv('MACD_SLOW', '10'))
+MACD_SIGNAL = int(os.getenv('MACD_SIGNAL', '4'))
+BB_PERIOD = int(os.getenv('BB_PERIOD', '14'))
+BB_STD = int(os.getenv('BB_STD', '2'))
+ADX_PERIOD = int(os.getenv('ADX_PERIOD', '7'))
 
 
 def get_btc_price():
@@ -14,6 +27,35 @@ def get_btc_price():
     r = requests.get(f"{BINANCE_API}/ticker/price", params={"symbol": "BTCUSDT"}, timeout=10)
     r.raise_for_status()
     return float(r.json()["price"])
+
+
+def get_price_at_timestamp(timestamp_sec):
+    """Returns the BTC/USDT open price at a specific timestamp (Price to Beat).
+
+    Args:
+        timestamp_sec: Unix timestamp in seconds (e.g. from market slug)
+
+    Returns:
+        float: BTC price at that timestamp, or 0.0 on error
+    """
+    try:
+        r = requests.get(
+            f"{BINANCE_API}/klines",
+            params={
+                "symbol": "BTCUSDT",
+                "interval": "1m",
+                "startTime": timestamp_sec * 1000,
+                "limit": 1,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if data:
+            return float(data[0][1])  # open price
+    except Exception:
+        pass
+    return 0.0
 
 
 def get_klines(interval="1m", limit=15):
@@ -46,7 +88,9 @@ def get_klines(interval="1m", limit=15):
     return candles
 
 
-def compute_rsi(candles, period=7):
+def compute_rsi(candles, period=None):
+    if period is None:
+        period = RSI_PERIOD
     """Fast RSI for scalping (short period = more reactive)"""
     if len(candles) < period + 1:
         return 50.0  # neutral
@@ -86,7 +130,9 @@ def compute_atr(candles):
     return sum(trs) / len(trs) if trs else 0.0
 
 
-def compute_adx(candles, period=7):
+def compute_adx(candles, period=None):
+    if period is None:
+        period = ADX_PERIOD
     """ADX (Average Directional Index) - measures trend strength (0-100).
     High ADX (>25) = strong trend, Low ADX (<20) = range/chop."""
     if len(candles) < period + 2:
@@ -152,7 +198,9 @@ def compute_adx(candles, period=7):
     return adx
 
 
-def compute_bollinger_bandwidth(candles, period=14):
+def compute_bollinger_bandwidth(candles, period=None):
+    if period is None:
+        period = BB_PERIOD
     """Bollinger Bandwidth - measures volatility spread.
     High bandwidth = high volatility, Low bandwidth = squeeze."""
     if len(candles) < period:
@@ -173,6 +221,142 @@ def compute_bollinger_bandwidth(candles, period=14):
     position = (current - lower) / band_range if band_range > 0 else 0.5
 
     return bandwidth, max(0, min(1, position))
+
+
+def compute_macd(candles, fast=None, slow=None, signal_period=None):
+    if fast is None:
+        fast = MACD_FAST
+    if slow is None:
+        slow = MACD_SLOW
+    if signal_period is None:
+        signal_period = MACD_SIGNAL
+    """MACD optimized for 1-min scalping (fast periods for quick signals).
+
+    Returns:
+        macd_line: MACD line value
+        signal_line: signal line value
+        histogram: MACD - signal
+        hist_delta: change in histogram (momentum acceleration)
+    """
+    closes = [c['close'] for c in candles]
+    if len(closes) < slow + signal_period:
+        return 0.0, 0.0, 0.0, 0.0
+
+    # EMA helper
+    def _ema_list(values, period):
+        k = 2 / (period + 1)
+        result = [values[0]]
+        for v in values[1:]:
+            result.append(v * k + result[-1] * (1 - k))
+        return result
+
+    fast_ema = _ema_list(closes, fast)
+    slow_ema = _ema_list(closes, slow)
+
+    # MACD line = fast EMA - slow EMA
+    macd_values = [f - s for f, s in zip(fast_ema, slow_ema)]
+
+    # Signal line = EMA of MACD
+    signal_values = _ema_list(macd_values[slow - 1:], signal_period)
+
+    macd_line = macd_values[-1]
+    signal_line = signal_values[-1]
+    histogram = macd_line - signal_line
+
+    # Histogram delta (acceleration)
+    if len(signal_values) >= 2:
+        prev_hist = macd_values[-2] - signal_values[-2]
+        hist_delta = histogram - prev_hist
+    else:
+        hist_delta = 0.0
+
+    return macd_line, signal_line, histogram, hist_delta
+
+
+def compute_vwap(candles):
+    """VWAP (Volume Weighted Average Price).
+
+    Returns:
+        vwap: VWAP price
+        price_vs_vwap: (current - vwap) / vwap as percentage
+        vwap_slope: slope direction of recent VWAP (-1 to +1)
+    """
+    if len(candles) < 3:
+        return 0.0, 0.0, 0.0
+
+    cum_vol = 0.0
+    cum_tp_vol = 0.0
+    vwap_values = []
+
+    for c in candles:
+        typical = (c['high'] + c['low'] + c['close']) / 3
+        cum_vol += c['volume']
+        cum_tp_vol += typical * c['volume']
+        if cum_vol > 0:
+            vwap_values.append(cum_tp_vol / cum_vol)
+        else:
+            vwap_values.append(typical)
+
+    vwap = vwap_values[-1]
+    current = candles[-1]['close']
+    price_vs_vwap = ((current - vwap) / vwap * 100) if vwap > 0 else 0.0
+
+    # VWAP slope (last 5 values)
+    if len(vwap_values) >= 5:
+        recent = vwap_values[-5:]
+        slope = (recent[-1] - recent[0]) / recent[0] * 100 if recent[0] > 0 else 0
+        vwap_slope = max(-1.0, min(1.0, slope * 50))  # normalize
+    else:
+        vwap_slope = 0.0
+
+    return vwap, price_vs_vwap, vwap_slope
+
+
+def compute_bollinger(candles, period=None, num_std=None):
+    if period is None:
+        period = BB_PERIOD
+    if num_std is None:
+        num_std = BB_STD
+    """Bollinger Bands with position and squeeze detection.
+
+    Returns:
+        upper: upper band
+        middle: middle band (SMA)
+        lower: lower band
+        bandwidth: (upper - lower) / middle as percentage
+        position: current price position within bands (0=lower, 1=upper)
+        squeeze: True if bandwidth is historically narrow
+    """
+    if len(candles) < period:
+        price = candles[-1]['close'] if candles else 0
+        return price, price, price, 0.0, 0.5, False
+
+    closes = [c['close'] for c in candles[-period:]]
+    middle = sum(closes) / len(closes)
+    variance = sum((c - middle) ** 2 for c in closes) / len(closes)
+    std_dev = variance ** 0.5
+
+    upper = middle + num_std * std_dev
+    lower = middle - num_std * std_dev
+    bandwidth = ((upper - lower) / middle * 100) if middle > 0 else 0
+
+    current = candles[-1]['close']
+    band_range = upper - lower
+    position = (current - lower) / band_range if band_range > 0 else 0.5
+    position = max(0.0, min(1.0, position))
+
+    # Squeeze detection: bandwidth < 50% of its recent average
+    squeeze = False
+    if len(candles) >= period * 2:
+        prev_closes = [c['close'] for c in candles[-(period * 2):-period]]
+        prev_mid = sum(prev_closes) / len(prev_closes)
+        prev_var = sum((c - prev_mid) ** 2 for c in prev_closes) / len(prev_closes)
+        prev_std = prev_var ** 0.5
+        prev_bw = (4 * prev_std / prev_mid * 100) if prev_mid > 0 else 0
+        if prev_bw > 0 and bandwidth < prev_bw * 0.5:
+            squeeze = True
+
+    return upper, middle, lower, bandwidth, position, squeeze
 
 
 def detect_regime(candles):
@@ -225,7 +409,7 @@ def detect_regime(candles):
 
 
 def get_full_analysis(candles=None):
-    """Returns full analysis with RSI, ATR, ADX, regime.
+    """Returns full analysis with all indicators.
 
     Args:
         candles: pre-fetched candles (from WebSocket). If None, fetches via HTTP.
@@ -245,6 +429,28 @@ def get_full_analysis(candles=None):
     regime, adx = detect_regime(candles)
     details['regime'] = regime
     details['adx'] = adx
+
+    # MACD
+    macd_line, signal_line, histogram, hist_delta = compute_macd(candles)
+    details['macd_line'] = macd_line
+    details['macd_signal'] = signal_line
+    details['macd_hist'] = histogram
+    details['macd_hist_delta'] = hist_delta
+
+    # VWAP
+    vwap, price_vs_vwap, vwap_slope = compute_vwap(candles)
+    details['vwap'] = vwap
+    details['vwap_pos'] = price_vs_vwap
+    details['vwap_slope'] = vwap_slope
+
+    # Bollinger Bands
+    bb_upper, bb_mid, bb_lower, bb_bw, bb_pos, bb_squeeze = compute_bollinger(candles)
+    details['bb_upper'] = bb_upper
+    details['bb_mid'] = bb_mid
+    details['bb_lower'] = bb_lower
+    details['bb_bw'] = bb_bw
+    details['bb_pos'] = bb_pos
+    details['bb_squeeze'] = bb_squeeze
 
     return direction, confidence, details
 

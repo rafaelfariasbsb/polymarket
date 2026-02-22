@@ -78,7 +78,7 @@ echo === Setup complete ===
 echo.
 echo Usage:
 echo   venv\Scripts\activate.bat
-echo   python radar_scalp.py          # default $4 trades
-echo   python radar_scalp.py 10       # $10 trades
+echo   python radar_poly.py          # default $4 trades
+echo   python radar_poly.py 10       # $10 trades
 echo.
 pause
