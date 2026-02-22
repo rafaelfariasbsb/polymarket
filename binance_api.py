@@ -224,9 +224,17 @@ def detect_regime(candles):
         return "RANGE", adx
 
 
-def get_full_analysis():
-    """Fetches klines and returns full analysis with RSI, ATR, ADX, regime."""
-    candles = get_klines(interval="1m", limit=20)
+def get_full_analysis(candles=None):
+    """Returns full analysis with RSI, ATR, ADX, regime.
+
+    Args:
+        candles: pre-fetched candles (from WebSocket). If None, fetches via HTTP.
+
+    Returns:
+        direction, confidence, details
+    """
+    if candles is None:
+        candles = get_klines(interval="1m", limit=20)
     direction, confidence, details = analyze_trend(candles)
 
     details['rsi'] = compute_rsi(candles)

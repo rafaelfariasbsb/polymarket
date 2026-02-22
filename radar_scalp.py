@@ -28,6 +28,7 @@ import shutil
 import requests
 from datetime import datetime
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from py_clob_client.clob_types import (
     OrderArgs, PartialCreateOrderOptions, OrderType,
@@ -57,6 +58,7 @@ from polymarket_api import (
     get_balance, monitor_order, CLOB,
 )
 from logger import RadarLogger
+from ws_binance import BinanceWS
 
 PRICE_ALERT = float(os.getenv('PRICE_ALERT', '0.80'))
 SIGNAL_STRENGTH_BEEP = int(os.getenv('SIGNAL_STRENGTH_BEEP', '50'))
@@ -299,7 +301,8 @@ def sleep_with_key(seconds):
 def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_data,
                market_slug, time_remaining, up_buy, down_buy, positions, signal,
                trade_amount, alert_active=False, alert_side="", alert_price=0.0,
-               session_pnl=0.0, trade_count=0, regime="", phase=""):
+               session_pnl=0.0, trade_count=0, regime="", phase="",
+               data_source="http", status_msg=""):
     """Redraws the static panel at the top (HEADER_LINES lines)."""
     w = shutil.get_terminal_size().columns
 
@@ -333,7 +336,8 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         reg_str = f"{Y}{B}CHOP{X}"
     else:
         reg_str = f"{D}RANGE{X}"
-    sys.stdout.write(f" {C}BINANCE {X}│ BTC: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str}")
+    src_str = f"{G}{B}WS{X}" if data_source == 'ws' else f"{D}HTTP{X}"
+    sys.stdout.write(f" {C}BINANCE {X}│ BTC: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str} │ {src_str}")
 
     # Line 5: Market
     sys.stdout.write(f"\033[5;1H\033[K")
@@ -389,9 +393,11 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
     else:
         sys.stdout.write(f" {W}SIGNAL  {X}│ {D}Waiting for data...{X}")
 
-    # Line 9: Alert
+    # Line 9: Alert / Status message
     sys.stdout.write(f"\033[9;1H\033[K")
-    if alert_active:
+    if status_msg:
+        sys.stdout.write(f" {Y}{B}STATUS  {X}│ {status_msg}")
+    elif alert_active:
         sys.stdout.write(f" {Y}{B}ALERT   {X}│ {Y}{B}{alert_side} @ ${alert_price:.2f} (>= ${PRICE_ALERT:.2f}){X}")
     else:
         sys.stdout.write(f" {D}ALERT   {X}│ {D}─{X}")
@@ -610,6 +616,23 @@ def main():
         print(f" {R}✗{X} {e}")
         return
 
+    # Start Binance WebSocket
+    binance_ws = BinanceWS()
+    print(f"   Connecting to Binance WS...", end="", flush=True)
+    ws_started = binance_ws.start()
+    if ws_started:
+        # Wait briefly for initial connection
+        for _ in range(20):
+            if binance_ws.is_connected:
+                break
+            time.sleep(0.1)
+        if binance_ws.is_connected:
+            print(f" {G}✓{X} WebSocket connected")
+        else:
+            print(f" {Y}~{X} WebSocket connecting (HTTP fallback active)")
+    else:
+        print(f" {D}─{X} websocket-client not installed (HTTP only)")
+
     print(f"   {G}Ready! Starting in 2s...{X}")
     time.sleep(2)
 
@@ -643,6 +666,8 @@ def main():
         alert_price = 0.0
         session_pnl = 0.0
         trade_count = 0
+        status_msg = ""
+        status_clear_at = 0  # timestamp to clear status_msg
 
         # Draw initial panel
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -655,6 +680,10 @@ def main():
         while True:
             try:
                 now = time.time()
+
+                # Auto-clear status message after 3s
+                if status_msg and now >= status_clear_at:
+                    status_msg = ""
 
                 # Refresh market every 60s
                 if now - last_market_check > 60:
@@ -670,9 +699,14 @@ def main():
                 elapsed = (now - last_market_check) / 60
                 current_time = max(0, base_time - elapsed)
 
-                # Collect data
+                # Collect data (WS candles if available, else HTTP)
                 try:
-                    bin_direction, confidence, details = get_full_analysis()
+                    ws_candles, data_source = binance_ws.get_candles(limit=20)
+                    if ws_candles and len(ws_candles) >= 5:
+                        bin_direction, confidence, details = get_full_analysis(candles=ws_candles)
+                    else:
+                        bin_direction, confidence, details = get_full_analysis()
+                        data_source = 'http'
                     btc_price = details.get('btc_price', 0)
                     binance_data = {
                         'score': details.get('score', 0),
@@ -686,8 +720,11 @@ def main():
                         pass
                     continue
 
-                up_buy = get_price(token_up, "BUY")
-                down_buy = get_price(token_down, "BUY")
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    fut_up = pool.submit(get_price, token_up, "BUY")
+                    fut_dn = pool.submit(get_price, token_down, "BUY")
+                    up_buy = fut_up.result()
+                    down_buy = fut_dn.result()
                 if up_buy <= 0:
                     sleep_with_key(2)
                     continue
@@ -714,7 +751,8 @@ def main():
                            down_buy, positions, current_signal, trade_amount,
                            alert_active, alert_side, alert_price,
                            session_pnl, trade_count,
-                           regime=current_regime, phase=current_phase)
+                           regime=current_regime, phase=current_phase,
+                           data_source=data_source, status_msg=status_msg)
 
                 # -- SCROLLING LOG --
                 s_dir = current_signal['direction']
@@ -860,7 +898,8 @@ def main():
                     alert_price = 0.0
 
                 # --- CHECK HOTKEYS DURING SLEEP ---
-                key = sleep_with_key(2)
+                cycle_time = 0.5 if data_source == 'ws' else 2
+                key = sleep_with_key(cycle_time)
                 if key == 'u':
                     info = execute_hotkey(client, 'up', trade_amount, token_up, token_down)
                     if info:
@@ -878,11 +917,16 @@ def main():
                                          info['shares'] * info['price'], "manual", 0, session_pnl)
                     print()
                 elif key == 'c':
-                    print()
-                    print(f"   {Y}{B}EMERGENCY CLOSE...{X}")
+                    # Show closing status in static panel
+                    status_msg = f"{Y}{B}EMERGENCY CLOSE...{X}"
+                    draw_panel(now_str, balance, btc_price, bin_direction, confidence,
+                               binance_data, market_slug, current_time, up_buy,
+                               down_buy, positions, current_signal, trade_amount,
+                               alert_active, alert_side, alert_price,
+                               session_pnl, trade_count,
+                               regime=current_regime, phase=current_phase,
+                               data_source=data_source, status_msg=status_msg)
                     msg = execute_close_market(client, token_up, token_down)
-                    exec_time = datetime.now().strftime("%H:%M:%S")
-                    print(f"   [{exec_time}] {msg}")
                     if positions:
                         for p in positions:
                             token_id = token_up if p['direction'] == 'up' else token_down
@@ -893,13 +937,19 @@ def main():
                             trade_history.append(pnl)
                             logger.log_trade("CLOSE", p['direction'], p['shares'], current_price,
                                              p['shares'] * current_price, "emergency", pnl, session_pnl)
-                            pnl_color = G if pnl >= 0 else R
                             balance += current_price * p['shares']
-                            print(f"   {pnl_color}  {p['direction'].upper()} {p['shares']:.0f}sh @ ${p['price']:.2f} → ${current_price:.2f} = {'+' if pnl >= 0 else ''}${pnl:.2f}{X}")
-                        pnl_color = G if session_pnl >= 0 else R
-                        print(f"   {pnl_color}{B}Session: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f} ({trade_count} trades){X}")
                         positions.clear()
-                    print()
+                    # Show result in static panel
+                    pnl_color = G if session_pnl >= 0 else R
+                    status_msg = f"{G}✓ Closed{X} │ {pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}"
+                    draw_panel(now_str, balance, btc_price, bin_direction, confidence,
+                               binance_data, market_slug, current_time, up_buy,
+                               down_buy, positions, current_signal, trade_amount,
+                               alert_active, alert_side, alert_price,
+                               session_pnl, trade_count,
+                               regime=current_regime, phase=current_phase,
+                               data_source=data_source, status_msg=status_msg)
+                    status_clear_at = time.time() + 5
                 elif key == 'q':
                     raise KeyboardInterrupt
 
@@ -987,6 +1037,8 @@ def main():
                 sleep_with_key(2)
 
     finally:
+        # Stop WebSocket
+        binance_ws.stop()
         # Restore terminal
         sys.stdout.write("\033[r")  # reset scroll region
         sys.stdout.flush()
