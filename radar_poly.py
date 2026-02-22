@@ -386,7 +386,8 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
                market_slug, time_remaining, up_buy, down_buy, positions, signal,
                trade_amount, alert_active=False, alert_side="", alert_price=0.0,
                session_pnl=0.0, trade_count=0, regime="", phase="",
-               data_source="http", status_msg="", price_to_beat=0.0, ws_status=""):
+               data_source="http", status_msg="", price_to_beat=0.0, ws_status="",
+               trade_history=None):
     """Redraws the static panel at the top (HEADER_LINES lines)."""
     w = shutil.get_terminal_size().columns
 
@@ -457,7 +458,19 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
     # Line 7: Positions + Session P&L
     sys.stdout.write(f"\033[7;1H\033[K")
     pnl_color = G if session_pnl >= 0 else R
-    pnl_str = f"{pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}"
+    # Compute running stats from trade_history
+    th = trade_history or []
+    stats_str = ""
+    if th:
+        wins = sum(1 for t in th if t > 0)
+        losses = len(th) - wins
+        wr = (wins / len(th) * 100) if th else 0
+        wr_color = G if wr >= 50 else R
+        gw = sum(t for t in th if t > 0)
+        gl = abs(sum(t for t in th if t < 0))
+        pf = (gw / gl) if gl > 0 else gw
+        stats_str = f" │ {wr_color}WR:{wr:.0f}%{X}({G}{wins}W{X}/{R}{losses}L{X}) │ {W}PF:{pf:.1f}{X}"
+    pnl_str = f"{pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}{stats_str}"
     if positions:
         # Aggregate by direction: total shares + weighted average price
         agg = {}
@@ -512,7 +525,8 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
     if status_msg:
         sys.stdout.write(f" {Y}{B}STATUS  {X}│ {status_msg}")
     elif alert_active:
-        sys.stdout.write(f" {Y}{B}ALERT   {X}│ {Y}{B}{alert_side} @ ${alert_price:.2f} (>= ${PRICE_ALERT:.2f}){X}")
+        alert_color = G if alert_side == "UP" else R
+        sys.stdout.write(f" {Y}{B}ALERT   {X}│ {alert_color}{B}{alert_side} @ ${alert_price:.2f}{X} (>= ${PRICE_ALERT:.2f})")
     else:
         sys.stdout.write(f" {D}ALERT   {X}│ {D}─{X}")
 
@@ -803,7 +817,7 @@ def main():
         draw_panel(now_str, balance, 0, '─', 0, {'rsi': 50, 'score': 0},
                    market_slug, time_remaining, 0, 0, positions, None, trade_amount,
                    session_pnl=session_pnl, trade_count=trade_count,
-                   price_to_beat=price_to_beat)
+                   price_to_beat=price_to_beat, trade_history=trade_history)
 
         print(f"   {D}Collecting initial data...{X}")
 
@@ -913,7 +927,7 @@ def main():
                            session_pnl, trade_count,
                            regime=current_regime, phase=current_phase,
                            data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
-                           price_to_beat=price_to_beat)
+                           price_to_beat=price_to_beat, trade_history=trade_history)
 
                 # -- SCROLLING LOG --
                 s_dir = current_signal['direction']
@@ -1124,7 +1138,7 @@ def main():
                                session_pnl, trade_count,
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
-                               price_to_beat=price_to_beat)
+                               price_to_beat=price_to_beat, trade_history=trade_history)
                     msg = execute_close_market(client, token_up, token_down)
                     if positions:
                         for p in positions:
@@ -1148,7 +1162,7 @@ def main():
                                session_pnl, trade_count,
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
-                               price_to_beat=price_to_beat)
+                               price_to_beat=price_to_beat, trade_history=trade_history)
                     status_clear_at = time.time() + 5
                 elif key == 'q':
                     raise KeyboardInterrupt
