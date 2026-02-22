@@ -380,6 +380,167 @@ def sleep_with_key(seconds):
     return None
 
 
+# --- Scrolling log formatter -----------------------------------------------------
+
+def format_scrolling_line(now_str, btc_price, up_buy, down_buy, signal, positions, regime):
+    """Format one line for the scrolling log area. Returns formatted string."""
+    s_dir = signal['direction']
+    strength = signal['strength']
+    rsi_val = signal['rsi']
+    trend = signal.get('trend', 0)
+    sr_raw = signal.get('sr_raw', 0)
+    sr_adj = signal.get('sr_adj', 0)
+
+    blocks = strength // 10
+    bar = '█' * blocks + '░' * (10 - blocks)
+    if s_dir == 'UP': color, sym = G, '▲'
+    elif s_dir == 'DOWN': color, sym = R, '▼'
+    else: color, sym = D, '─'
+    rsi_arrow = '↑' if rsi_val < 45 else '↓' if rsi_val > 55 else '─'
+
+    col_time   = f"{D}{now_str}{X}"
+    col_btc    = f"BTC:{W}${btc_price:>7,.0f}{X}"
+    col_up     = f"UP:{G}${up_buy:.2f}{X}"
+    col_dn     = f"DN:{R}${down_buy:.2f}{X}"
+    rsi_c = G if rsi_val < 40 else R if rsi_val > 60 else D
+    col_rsi    = f"{rsi_c}RSI:{rsi_val:>2.0f}{rsi_arrow}{X}"
+    col_signal = f"{color}{B}{sym} {s_dir:<7s} {strength:>3d}%{X}"
+    col_bar    = f"{color}[{bar}]{X}"
+    col_vol    = f"{Y}VOL↑{X}" if signal['high_vol'] else "    "
+
+    if abs(trend) > 0.3:
+        t_sym = '⬆' if trend > 0 else '⬇'
+        t_color = G if trend > 0 else R
+        t_text = f"T:{trend:+.1f}{t_sym}"
+        col_trend = f"{t_color}{t_text:<7s}{X}"
+    else:
+        col_trend = f"{D}{'T: 0.0':<7s}{X}"
+
+    if sr_raw != 0:
+        sr_text = f"SR:{sr_raw:+.1f}→{sr_adj:+.1f}"
+        sr_color = G if sr_raw > 0 else R
+        col_sr = f"{sr_color}{sr_text:<13s}{X}"
+    else:
+        col_sr = f"{D}{'SR: 0.0':<13s}{X}"
+
+    # MACD column
+    macd_h = signal.get('macd_hist', 0)
+    macd_d = signal.get('macd_hist_delta', 0)
+    if macd_h > 0:
+        m_arrow = '▲' if macd_d > 0 else '▼' if macd_d < 0 else '─'
+        col_macd = f"{G}{macd_h:>+5.1f}{m_arrow}{X}"
+    elif macd_h < 0:
+        m_arrow = '▼' if macd_d < 0 else '▲' if macd_d > 0 else '─'
+        col_macd = f"{R}{macd_h:>+5.1f}{m_arrow}{X}"
+    else:
+        col_macd = f"{D}  0.0─{X}"
+
+    # VWAP column
+    v_pos = signal.get('vwap_pos', 0)
+    if v_pos > 0.02:
+        col_vwap = f"{G}{v_pos:>+5.2f}↑{X}"
+    elif v_pos < -0.02:
+        col_vwap = f"{R}{v_pos:>+5.2f}↓{X}"
+    else:
+        col_vwap = f"{D} 0.00─{X}"
+
+    # Bollinger position column
+    bb_p = signal.get('bb_pos', 0.5)
+    bb_sq = signal.get('bb_squeeze', False)
+    bb_pct = f"{int(bb_p * 100):>3d}%"
+    if bb_p > 0.80:
+        col_bb = f"{G}{'SQ' if bb_sq else 'HI'}{bb_pct}{X}"
+    elif bb_p < 0.20:
+        col_bb = f"{R}{'SQ' if bb_sq else 'LO'}{bb_pct}{X}"
+    else:
+        col_bb = f"{D}{'SQ' if bb_sq else 'MD'}{bb_pct}{X}"
+
+    # Position tag
+    pos_str = ""
+    if positions:
+        total_shares = sum(p['shares'] for p in positions)
+        dirs = set(p['direction'] for p in positions)
+        d_str = '/'.join(d.upper() for d in dirs)
+        pos_str = f" {M}{B}[{d_str} {total_shares:.0f}sh]{X}"
+
+    # Regime tag
+    if regime == 'TREND_UP':
+        col_regime = f"{G}T▲{X}"
+    elif regime == 'TREND_DOWN':
+        col_regime = f"{R}T▼{X}"
+    elif regime == 'CHOP':
+        col_regime = f"{Y}CH{X}"
+    else:
+        col_regime = f"{D}RG{X}"
+
+    return f"   {col_time} │ {col_btc} │ {col_up} {col_dn} │ {col_rsi} │ {col_signal} {col_bar} │ {col_vol} │ {col_trend} │ {col_macd} │ {col_vwap} │ {col_bb} │ {col_sr} │ {col_regime}{pos_str}"
+
+
+# --- Session stats ---------------------------------------------------------------
+
+def calculate_session_stats(trade_history):
+    """Calculate session statistics from trade history.
+
+    Returns dict with: wins, losses, win_rate, best, worst,
+    gross_wins, gross_losses, profit_factor, max_drawdown.
+    """
+    if not trade_history:
+        return {
+            'wins': 0, 'losses': 0, 'win_rate': 0, 'best': 0, 'worst': 0,
+            'gross_wins': 0, 'gross_losses': 0, 'profit_factor': 0, 'max_drawdown': 0,
+        }
+    wins = sum(1 for t in trade_history if t > 0)
+    losses = sum(1 for t in trade_history if t <= 0)
+    win_rate = (wins / len(trade_history) * 100) if trade_history else 0
+    best = max(trade_history)
+    worst = min(trade_history)
+    gross_wins = sum(t for t in trade_history if t > 0)
+    gross_losses = abs(sum(t for t in trade_history if t < 0))
+    profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else gross_wins
+    # Max drawdown
+    max_dd = 0.0
+    peak = 0.0
+    cumul = 0.0
+    for t in trade_history:
+        cumul += t
+        if cumul > peak:
+            peak = cumul
+        dd = peak - cumul
+        if dd > max_dd:
+            max_dd = dd
+    return {
+        'wins': wins, 'losses': losses, 'win_rate': win_rate,
+        'best': best, 'worst': worst,
+        'gross_wins': gross_wins, 'gross_losses': gross_losses,
+        'profit_factor': profit_factor, 'max_drawdown': max_dd,
+    }
+
+
+def print_session_summary(duration_min, trade_count, session_pnl, trade_history):
+    """Print formatted session summary to terminal."""
+    stats = calculate_session_stats(trade_history)
+    print()
+    print(f" {C}{B}{'═' * 45}{X}")
+    print(f" {C}{B} SESSION SUMMARY{X}")
+    print(f" {D}{'─' * 45}{X}")
+    print(f"  Duration:       {duration_min:.0f} min")
+    print(f"  Total Trades:   {trade_count}")
+    if trade_history:
+        wr_color = G if stats['win_rate'] >= 50 else R
+        print(f"  Win Rate:       {wr_color}{stats['win_rate']:.0f}%{X} ({G}{stats['wins']}W{X} / {R}{stats['losses']}L{X})")
+        pnl_c = G if session_pnl >= 0 else R
+        print(f"  Total P&L:      {pnl_c}{'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X}")
+        print(f"  Best Trade:     {G}+${stats['best']:.2f}{X}")
+        print(f"  Worst Trade:    {R}${stats['worst']:.2f}{X}")
+        print(f"  Profit Factor:  {W}{stats['profit_factor']:.2f}{X}")
+        print(f"  Max Drawdown:   {R}-${stats['max_drawdown']:.2f}{X}")
+    else:
+        print(f"  {D}No trades this session{X}")
+    print(f" {C}{B}{'═' * 45}{X}")
+    print()
+    return stats
+
+
 # --- Static panel ----------------------------------------------------------------
 
 def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_data,
@@ -558,6 +719,70 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
 
     sys.stdout.write("\033[u")  # restore cursor
     sys.stdout.flush()
+
+
+# --- Trade helpers ---------------------------------------------------------------
+
+def close_all_positions(positions, token_up, token_down, logger, reason, session_pnl, trade_history):
+    """Close all positions and calculate P&L for each.
+
+    Args:
+        positions: list of position dicts
+        token_up/token_down: token IDs
+        logger: RadarLogger instance
+        reason: str — 'market_expired', 'emergency', 'exit', 'tp', 'sl', 'cancel'
+        session_pnl: current cumulative P&L
+        trade_history: list of individual trade P&L values
+
+    Returns:
+        (total_pnl, count, updated_session_pnl, pnl_list)
+        pnl_list: list of (direction, shares, entry_price, exit_price, pnl) per position
+    """
+    total_pnl = 0.0
+    count = 0
+    pnl_list = []
+
+    for p in positions:
+        token_id = token_up if p['direction'] == 'up' else token_down
+        try:
+            exit_price = get_price(token_id, "SELL")
+        except Exception:
+            exit_price = 0
+        pnl = (exit_price - p['price']) * p['shares'] if exit_price > 0 else 0
+        total_pnl += pnl
+        count += 1
+        session_pnl += pnl
+        trade_history.append(pnl)
+        pnl_list.append((p['direction'], p['shares'], p['price'], exit_price, pnl))
+        logger.log_trade("CLOSE", p['direction'], p['shares'], exit_price,
+                         p['shares'] * exit_price, reason, pnl, session_pnl)
+
+    positions.clear()
+    return total_pnl, count, session_pnl, pnl_list
+
+
+def handle_buy(client, direction, trade_amount, token_up, token_down,
+               positions, balance, logger, session_pnl, reason="manual"):
+    """Execute buy and update state. Returns (info, balance, last_action).
+
+    Args:
+        direction: 'up' or 'down'
+        reason: 'signal' or 'manual'
+
+    Returns:
+        (info_dict_or_None, updated_balance, last_action_str)
+    """
+    info = execute_hotkey(client, direction, trade_amount, token_up, token_down)
+    if info:
+        d_color = G if direction == 'up' else R
+        last_action = f"{d_color}{B}BUY {direction.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}{reason}{X}"
+        positions.append(info)
+        balance -= info['price'] * info['shares']
+        logger.log_trade("BUY", direction, info['shares'], info['price'],
+                         info['shares'] * info['price'], reason, 0, session_pnl)
+    else:
+        last_action = f"{R}✗ BUY {direction.upper()} FAILED{X}"
+    return info, balance, last_action
 
 
 # --- Trade execution -------------------------------------------------------------
@@ -860,21 +1085,13 @@ def main():
                         if new_slug != market_slug:
                             if positions:
                                 print(f"   {Y}{B}MARKET CHANGED → {new_slug} — clearing {len(positions)} old position(s){X}")
-                                for p in positions:
-                                    token_id = token_up if p['direction'] == 'up' else token_down
-                                    try:
-                                        exit_price = get_price(token_id, "SELL")
-                                    except Exception:
-                                        exit_price = 0
-                                    pnl = (exit_price - p['price']) * p['shares'] if exit_price > 0 else 0
-                                    session_pnl += pnl
-                                    trade_count += 1
-                                    trade_history.append(pnl)
+                                total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
+                                    positions, token_up, token_down, logger, "market_expired",
+                                    session_pnl, trade_history)
+                                trade_count += cnt
+                                for d, sh, ep, xp, pnl in pnl_list:
                                     pnl_color = G if pnl >= 0 else R
-                                    print(f"   {Y}  expired {p['direction'].upper()} {p['shares']:.0f}sh @ ${p['price']:.2f} → ${exit_price:.2f} {pnl_color}P&L: {'+' if pnl >= 0 else ''}${pnl:.2f}{X}")
-                                    logger.log_trade("CLOSE", p['direction'], p['shares'], exit_price,
-                                                     p['shares'] * exit_price, "market_expired", pnl, session_pnl)
-                                positions.clear()
+                                    print(f"   {Y}  expired {d.upper()} {sh:.0f}sh @ ${ep:.2f} → ${xp:.2f} {pnl_color}P&L: {'+' if pnl >= 0 else ''}${pnl:.2f}{X}")
                             history.clear()
                             # Fetch new Price to Beat
                             try:
@@ -966,93 +1183,12 @@ def main():
                 # -- SCROLLING LOG --
                 s_dir = current_signal['direction']
                 strength = current_signal['strength']
-                rsi_val = current_signal['rsi']
                 sug = current_signal.get('suggestion')
                 trend = current_signal.get('trend', 0)
                 sr_raw = current_signal.get('sr_raw', 0)
-                sr_adj = current_signal.get('sr_adj', 0)
 
-                blocks = strength // 10
-                bar = '█' * blocks + '░' * (10 - blocks)
-                if s_dir == 'UP': color, sym = G, '▲'
-                elif s_dir == 'DOWN': color, sym = R, '▼'
-                else: color, sym = D, '─'
-                rsi_arrow = '↑' if rsi_val < 45 else '↓' if rsi_val > 55 else '─'
-
-                col_time   = f"{D}{now_str}{X}"
-                col_btc    = f"BTC:{W}${btc_price:>7,.0f}{X}"
-                col_up     = f"UP:{G}${up_buy:.2f}{X}"
-                col_dn     = f"DN:{R}${down_buy:.2f}{X}"
-                rsi_c = G if rsi_val < 40 else R if rsi_val > 60 else D
-                col_rsi    = f"{rsi_c}RSI:{rsi_val:>2.0f}{rsi_arrow}{X}"
-                col_signal = f"{color}{B}{sym} {s_dir:<7s} {strength:>3d}%{X}"
-                col_bar    = f"{color}[{bar}]{X}"
-                col_vol    = f"{Y}VOL↑{X}" if current_signal['high_vol'] else "    "
-                if abs(trend) > 0.3:
-                    t_sym = '⬆' if trend > 0 else '⬇'
-                    t_color = G if trend > 0 else R
-                    t_text = f"T:{trend:+.1f}{t_sym}"
-                    col_trend = f"{t_color}{t_text:<7s}{X}"
-                else:
-                    col_trend = f"{D}{'T: 0.0':<7s}{X}"
-                if sr_raw != 0:
-                    sr_text = f"SR:{sr_raw:+.1f}→{sr_adj:+.1f}"
-                    sr_color = G if sr_raw > 0 else R
-                    col_sr = f"{sr_color}{sr_text:<13s}{X}"
-                else:
-                    col_sr = f"{D}{'SR: 0.0':<13s}{X}"
-
-                # MACD column
-                macd_h = current_signal.get('macd_hist', 0)
-                macd_d = current_signal.get('macd_hist_delta', 0)
-                if macd_h > 0:
-                    m_arrow = '▲' if macd_d > 0 else '▼' if macd_d < 0 else '─'
-                    col_macd = f"{G}{macd_h:>+5.1f}{m_arrow}{X}"
-                elif macd_h < 0:
-                    m_arrow = '▼' if macd_d < 0 else '▲' if macd_d > 0 else '─'
-                    col_macd = f"{R}{macd_h:>+5.1f}{m_arrow}{X}"
-                else:
-                    col_macd = f"{D}  0.0─{X}"
-
-                # VWAP column
-                v_pos = current_signal.get('vwap_pos', 0)
-                if v_pos > 0.02:
-                    col_vwap = f"{G}{v_pos:>+5.2f}↑{X}"
-                elif v_pos < -0.02:
-                    col_vwap = f"{R}{v_pos:>+5.2f}↓{X}"
-                else:
-                    col_vwap = f"{D} 0.00─{X}"
-
-                # Bollinger position column
-                bb_p = current_signal.get('bb_pos', 0.5)
-                bb_sq = current_signal.get('bb_squeeze', False)
-                bb_pct = f"{int(bb_p * 100):>3d}%"
-                if bb_p > 0.80:
-                    col_bb = f"{G}{'SQ' if bb_sq else 'HI'}{bb_pct}{X}"
-                elif bb_p < 0.20:
-                    col_bb = f"{R}{'SQ' if bb_sq else 'LO'}{bb_pct}{X}"
-                else:
-                    col_bb = f"{D}{'SQ' if bb_sq else 'MD'}{bb_pct}{X}"
-
-                pos_str = ""
-                if positions:
-                    total_shares = sum(p['shares'] for p in positions)
-                    dirs = set(p['direction'] for p in positions)
-                    d_str = '/'.join(d.upper() for d in dirs)
-                    pos_str = f" {M}{B}[{d_str} {total_shares:.0f}sh]{X}"
-
-                # Regime tag
-                if current_regime == 'TREND_UP':
-                    col_regime = f"{G}T▲{X}"
-                elif current_regime == 'TREND_DOWN':
-                    col_regime = f"{R}T▼{X}"
-                elif current_regime == 'CHOP':
-                    col_regime = f"{Y}CH{X}"
-                else:
-                    col_regime = f"{D}RG{X}"
-
-                line = f"   {col_time} │ {col_btc} │ {col_up} {col_dn} │ {col_rsi} │ {col_signal} {col_bar} │ {col_vol} │ {col_trend} │ {col_macd} │ {col_vwap} │ {col_bb} │ {col_sr} │ {col_regime}{pos_str}"
-                print(line)
+                print(format_scrolling_line(now_str, btc_price, up_buy, down_buy,
+                                            current_signal, positions, current_regime))
 
                 # --- OPPORTUNITY DETECTED ---
                 # Use phase-dependent threshold (CLOSING phase = 999, blocks all)
@@ -1074,14 +1210,10 @@ def main():
 
                     if key == 's':
                         trade_dir = 'up' if s_dir == 'UP' else 'down'
-                        info = execute_hotkey(client, trade_dir, trade_amount, token_up, token_down)
+                        info, balance, last_action = handle_buy(
+                            client, trade_dir, trade_amount, token_up, token_down,
+                            positions, balance, logger, session_pnl, reason="signal")
                         if info:
-                            d_color = G if trade_dir == 'up' else R
-                            last_action = f"{d_color}{B}BUY {trade_dir.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}signal{X}"
-                            positions.append(info)
-                            balance -= info['price'] * info['shares']
-                            logger.log_trade("BUY", trade_dir, info['shares'], info['price'],
-                                             info['shares'] * info['price'], "signal", 0, session_pnl)
                             real_entry = info['price']
                             tp = min(real_entry + (sug['tp'] - sug['entry']), 0.95)
                             sl = max(real_entry - (sug['entry'] - sug['sl']), 0.03)
@@ -1122,16 +1254,9 @@ def main():
                         last_beep = time.time()
                     elif key in ('u', 'd'):
                         manual_dir = 'up' if key == 'u' else 'down'
-                        info = execute_hotkey(client, manual_dir, trade_amount, token_up, token_down)
-                        if info:
-                            d_color = G if manual_dir == 'up' else R
-                            last_action = f"{d_color}{B}BUY {manual_dir.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
-                            positions.append(info)
-                            balance -= info['price'] * info['shares']
-                            logger.log_trade("BUY", manual_dir, info['shares'], info['price'],
-                                             info['shares'] * info['price'], "manual", 0, session_pnl)
-                        else:
-                            last_action = f"{R}✗ BUY {manual_dir.upper()} FAILED{X}"
+                        info, balance, last_action = handle_buy(
+                            client, manual_dir, trade_amount, token_up, token_down,
+                            positions, balance, logger, session_pnl, reason="manual")
                     else:
                         print(f"   {D}Ignored.{X}")
                         print()
@@ -1156,26 +1281,11 @@ def main():
                 # --- CHECK HOTKEYS DURING SLEEP ---
                 cycle_time = 0.5 if data_source == 'ws' else 2
                 key = sleep_with_key(cycle_time)
-                if key == 'u':
-                    info = execute_hotkey(client, 'up', trade_amount, token_up, token_down)
-                    if info:
-                        positions.append(info)
-                        balance -= info['price'] * info['shares']
-                        logger.log_trade("BUY", "up", info['shares'], info['price'],
-                                         info['shares'] * info['price'], "manual", 0, session_pnl)
-                        last_action = f"{G}{B}BUY UP{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
-                    else:
-                        last_action = f"{R}✗ BUY UP FAILED{X}"
-                elif key == 'd':
-                    info = execute_hotkey(client, 'down', trade_amount, token_up, token_down)
-                    if info:
-                        positions.append(info)
-                        balance -= info['price'] * info['shares']
-                        logger.log_trade("BUY", "down", info['shares'], info['price'],
-                                         info['shares'] * info['price'], "manual", 0, session_pnl)
-                        last_action = f"{R}{B}BUY DOWN{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
-                    else:
-                        last_action = f"{R}✗ BUY DOWN FAILED{X}"
+                if key in ('u', 'd'):
+                    buy_dir = 'up' if key == 'u' else 'down'
+                    _, balance, last_action = handle_buy(
+                        client, buy_dir, trade_amount, token_up, token_down,
+                        positions, balance, logger, session_pnl, reason="manual")
                 elif key == 'c':
                     # Show closing status in static panel
                     status_msg = f"{Y}{B}EMERGENCY CLOSE...{X}"
@@ -1191,17 +1301,12 @@ def main():
                                last_action=last_action)
                     msg = execute_close_market(client, token_up, token_down)
                     if positions:
-                        for p in positions:
-                            token_id = token_up if p['direction'] == 'up' else token_down
-                            current_price = get_price(token_id, "SELL")
-                            pnl = (current_price - p['price']) * p['shares']
-                            session_pnl += pnl
-                            trade_count += 1
-                            trade_history.append(pnl)
-                            logger.log_trade("CLOSE", p['direction'], p['shares'], current_price,
-                                             p['shares'] * current_price, "emergency", pnl, session_pnl)
-                            balance += current_price * p['shares']
-                        positions.clear()
+                        total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
+                            positions, token_up, token_down, logger, "emergency",
+                            session_pnl, trade_history)
+                        trade_count += cnt
+                        for d, sh, ep, xp, pnl in pnl_list:
+                            balance += xp * sh
                     # Show result in static panel
                     pnl_color = G if session_pnl >= 0 else R
                     status_msg = f"{G}✓ Closed{X} │ {pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}"
@@ -1228,58 +1333,14 @@ def main():
                     print(f"{Y}Closing positions before exit...{X}")
                     msg = execute_close_market(client, token_up, token_down)
                     print(f"   {msg}")
-                    for p in positions:
-                        token_id = token_up if p['direction'] == 'up' else token_down
-                        current_price = get_price(token_id, "SELL")
-                        pnl = (current_price - p['price']) * p['shares']
-                        session_pnl += pnl
-                        trade_count += 1
-                        trade_history.append(pnl)
-                        logger.log_trade("CLOSE", p['direction'], p['shares'], current_price,
-                                         p['shares'] * current_price, "exit", pnl, session_pnl)
-                    positions.clear()
+                    total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
+                        positions, token_up, token_down, logger, "exit",
+                        session_pnl, trade_history)
+                    trade_count += cnt
 
                 # Session summary
                 duration_min = (time.time() - session_start) / 60
-                wins = sum(1 for t in trade_history if t > 0)
-                losses = sum(1 for t in trade_history if t <= 0)
-                win_rate = (wins / len(trade_history) * 100) if trade_history else 0
-                best = max(trade_history) if trade_history else 0
-                worst = min(trade_history) if trade_history else 0
-                gross_wins = sum(t for t in trade_history if t > 0)
-                gross_losses = abs(sum(t for t in trade_history if t < 0))
-                profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else gross_wins
-                # Max drawdown
-                max_dd = 0.0
-                peak = 0.0
-                cumul = 0.0
-                for t in trade_history:
-                    cumul += t
-                    if cumul > peak:
-                        peak = cumul
-                    dd = peak - cumul
-                    if dd > max_dd:
-                        max_dd = dd
-
-                print()
-                print(f" {C}{B}{'═' * 45}{X}")
-                print(f" {C}{B} SESSION SUMMARY{X}")
-                print(f" {D}{'─' * 45}{X}")
-                print(f"  Duration:       {duration_min:.0f} min")
-                print(f"  Total Trades:   {trade_count}")
-                if trade_history:
-                    wr_color = G if win_rate >= 50 else R
-                    print(f"  Win Rate:       {wr_color}{win_rate:.0f}%{X} ({G}{wins}W{X} / {R}{losses}L{X})")
-                    pnl_c = G if session_pnl >= 0 else R
-                    print(f"  Total P&L:      {pnl_c}{'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X}")
-                    print(f"  Best Trade:     {G}+${best:.2f}{X}")
-                    print(f"  Worst Trade:    {R}${worst:.2f}{X}")
-                    print(f"  Profit Factor:  {W}{profit_factor:.2f}{X}")
-                    print(f"  Max Drawdown:   {R}-${max_dd:.2f}{X}")
-                else:
-                    print(f"  {D}No trades this session{X}")
-                print(f" {C}{B}{'═' * 45}{X}")
-                print()
+                stats = print_session_summary(duration_min, trade_count, session_pnl, trade_history)
 
                 # Log session to CSV
                 logger.log_session_summary({
@@ -1288,12 +1349,12 @@ def main():
                     "end_time": datetime.now().strftime("%H:%M:%S"),
                     "duration_min": duration_min,
                     "total_trades": trade_count,
-                    "wins": wins, "losses": losses,
-                    "win_rate": win_rate,
+                    "wins": stats['wins'], "losses": stats['losses'],
+                    "win_rate": stats['win_rate'],
                     "total_pnl": session_pnl,
-                    "best_trade": best, "worst_trade": worst,
-                    "profit_factor": profit_factor,
-                    "max_drawdown": max_dd,
+                    "best_trade": stats['best'], "worst_trade": stats['worst'],
+                    "profit_factor": stats['profit_factor'],
+                    "max_drawdown": stats['max_drawdown'],
                 })
 
                 print(f"{Y}Radar terminated{X}")
