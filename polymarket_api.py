@@ -283,10 +283,11 @@ def check_limit(client, token_up, token_down, new_order_value):
     return can_trade, current_exposure, limit
 
 
-def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None):
+def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None, quiet=False):
     """
     Monitors an order until filled, cancelled, or timeout.
     cancel_fn: callable that returns True to cancel the order (e.g. ESC pressed)
+    quiet: if True, suppress all print output
     Returns (final_status, order_details)
     """
     start = time.time()
@@ -295,7 +296,8 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None)
     while True:
         # Check external cancellation
         if cancel_fn and cancel_fn():
-            print(f"\n   Cancelling order (ESC)...")
+            if not quiet:
+                print(f"\n   Cancelling order (ESC)...")
             try:
                 client.cancel(order_id)
             except Exception:
@@ -304,7 +306,8 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None)
 
         elapsed = time.time() - start
         if elapsed > timeout_sec:
-            print(f"\n   Timeout ({timeout_sec}s) reached. Cancelling order...")
+            if not quiet:
+                print(f"\n   Timeout ({timeout_sec}s) reached. Cancelling order...")
             try:
                 client.cancel(order_id)
             except Exception:
@@ -314,7 +317,8 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None)
         try:
             order = client.get_order(order_id)
         except Exception as e:
-            print(f"\n   Error querying order: {e}")
+            if not quiet:
+                print(f"\n   Error querying order: {e}")
             time.sleep(interval)
             continue
 
@@ -326,11 +330,12 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None)
             last_status = status
 
         # Show progress
-        if original_size > 0:
-            pct = (size_matched / original_size) * 100
-            print(f"\r   Status: {status} | Filled: {pct:.1f}% ({size_matched:.2f}/{original_size:.2f}) | {elapsed:.0f}s", end="", flush=True)
-        else:
-            print(f"\r   Status: {status} | {elapsed:.0f}s", end="", flush=True)
+        if not quiet:
+            if original_size > 0:
+                pct = (size_matched / original_size) * 100
+                print(f"\r   Status: {status} | Filled: {pct:.1f}% ({size_matched:.2f}/{original_size:.2f}) | {elapsed:.0f}s", end="", flush=True)
+            else:
+                print(f"\r   Status: {status} | {elapsed:.0f}s", end="", flush=True)
 
         if status == "MATCHED":
             # Re-query if size_matched == 0 (API race condition)
@@ -341,11 +346,13 @@ def monitor_order(client, order_id, interval=3, timeout_sec=300, cancel_fn=None)
                     size_matched = float(order.get("size_matched", 0)) if isinstance(order, dict) else 0
                 except Exception:
                     pass
-            print()
+            if not quiet:
+                print()
             return "FILLED", order
 
         if status in ("CANCELED", "CANCELLED"):
-            print()
+            if not quiet:
+                print()
             return "CANCELLED", order
 
         time.sleep(interval)

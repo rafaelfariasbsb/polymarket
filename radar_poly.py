@@ -111,7 +111,7 @@ D = '\033[90m'
 M = '\033[95m'
 X = '\033[0m'
 
-HEADER_LINES = 14  # static panel lines
+HEADER_LINES = 15  # static panel lines
 
 
 def get_price(token_id, side):
@@ -387,7 +387,7 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
                trade_amount, alert_active=False, alert_side="", alert_price=0.0,
                session_pnl=0.0, trade_count=0, regime="", phase="",
                data_source="http", status_msg="", price_to_beat=0.0, ws_status="",
-               trade_history=None):
+               trade_history=None, last_action=""):
     """Redraws the static panel at the top (HEADER_LINES lines)."""
     w = shutil.get_terminal_size().columns
 
@@ -422,7 +422,7 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
     else:
         reg_str = f"{D}RANGE{X}"
     if data_source == 'ws':
-        src_str = f"{G}{B}WS{X}"
+        src_str = f"{G}{B}WebSocket{X}"
     elif ws_status:
         src_str = f"{D}HTTP{X} {Y}{ws_status}{X}"
     else:
@@ -490,8 +490,15 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
     else:
         sys.stdout.write(f" {M}POSITION{X}│ {D}None{X} │ {pnl_str}")
 
-    # Line 8: Signal
+    # Line 8: Last action
     sys.stdout.write(f"\033[8;1H\033[K")
+    if last_action:
+        sys.stdout.write(f" {W}ACTION  {X}│ {last_action}")
+    else:
+        sys.stdout.write(f" {D}ACTION  {X}│ {D}─{X}")
+
+    # Line 9: Signal
+    sys.stdout.write(f"\033[9;1H\033[K")
     if signal:
         s_dir = signal['direction']
         strength = signal['strength']
@@ -514,14 +521,14 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         vwap_color = G if vwap_p > 0.01 else R if vwap_p < -0.01 else D
         vwap_str = f"{vwap_color}VW:{vwap_p:+.2f}{X}" if abs(vwap_p) > 0.01 else f"{D}VW:0{X}"
         bb_p = signal.get('bb_pos', 0.5)
-        bb_color = G if bb_p < 0.20 else R if bb_p > 0.80 else D
+        bb_color = G if bb_p > 0.80 else R if bb_p < 0.20 else D
         bb_str = f"{bb_color}BB:{bb_p:.0%}{X}"
         sys.stdout.write(f" {W}SIGNAL  {X}│ {s_color}{B}{s_sym} {s_dir:<7s} {strength:>3d}%{X} [{bar_s}] │ {rsi_color}RSI:{rsi_s:.0f}{rsi_arrow}{X} │ {t_str} │ {macd_str} │ {vwap_str} │ {bb_str}")
     else:
         sys.stdout.write(f" {W}SIGNAL  {X}│ {D}Waiting for data...{X}")
 
-    # Line 9: Alert / Status message
-    sys.stdout.write(f"\033[9;1H\033[K")
+    # Line 10: Alert / Status message
+    sys.stdout.write(f"\033[10;1H\033[K")
     if status_msg:
         sys.stdout.write(f" {Y}{B}STATUS  {X}│ {status_msg}")
     elif alert_active:
@@ -530,24 +537,24 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
     else:
         sys.stdout.write(f" {D}ALERT   {X}│ {D}─{X}")
 
-    # Line 10: separator
-    sys.stdout.write(f"\033[10;1H\033[K")
+    # Line 11: separator
+    sys.stdout.write(f"\033[11;1H\033[K")
     sys.stdout.write(f" {'─' * (w - 2)}")
 
-    # Line 11: Hotkeys
-    sys.stdout.write(f"\033[11;1H\033[K")
+    # Line 12: Hotkeys
+    sys.stdout.write(f"\033[12;1H\033[K")
     sys.stdout.write(f" {W}{B}U{X}{D}=buy UP{X} │ {W}{B}D{X}{D}=buy DOWN{X} │ {W}{B}C{X}{D}=close all{X} │ {W}{B}S{X}{D}=accept signal{X} │ {W}{B}Q{X}{D}=exit{X}")
 
-    # Line 12: bottom separator (full width)
-    sys.stdout.write(f"\033[12;1H\033[K")
+    # Line 13: bottom separator (full width)
+    sys.stdout.write(f"\033[13;1H\033[K")
     sys.stdout.write(f" {C}{B}{'═' * (w - 2)}{X}")
 
-    # Line 13: column headers
-    sys.stdout.write(f"\033[13;1H\033[K")
-    sys.stdout.write(f"   {D}{'TIME':8s} │ {'BTC':>12s} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>6s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>4s} │ {'S/R':>13s} │ {'RG':2s}{X}")
-
-    # Line 14: blank (space before log)
+    # Line 14: column headers
     sys.stdout.write(f"\033[14;1H\033[K")
+    sys.stdout.write(f"   {D}{'TIME':8s} │ {'BTC':>12s} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>7s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>6s} │ {'S/R':>13s} │ {'REGIME':6s}{X}")
+
+    # Line 15: blank (space before log)
+    sys.stdout.write(f"\033[15;1H\033[K")
 
     sys.stdout.write("\033[u")  # restore cursor
     sys.stdout.flush()
@@ -555,7 +562,7 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
 
 # --- Trade execution -------------------------------------------------------------
 
-def execute_buy_market(client, direction, amount_usd, token_up, token_down):
+def execute_buy_market(client, direction, amount_usd, token_up, token_down, quiet=False):
     """Execute aggressive market buy order."""
     token_id = token_up if direction == "up" else token_down
 
@@ -583,7 +590,7 @@ def execute_buy_market(client, direction, amount_usd, token_up, token_down):
     if not order_id:
         return None, f"{R}✗ No order ID{X}"
 
-    status, details = monitor_order(client, order_id, interval=2, timeout_sec=30)
+    status, details = monitor_order(client, order_id, interval=2, timeout_sec=30, quiet=quiet)
 
     if status == "FILLED":
         sm = float(details.get("size_matched", 0)) if details else 0
@@ -689,14 +696,8 @@ def monitor_tp_sl(token_id, tp, sl, tp_above, sl_above):
 
 def execute_hotkey(client, direction, trade_amount, token_up, token_down):
     """Execute manual buy via hotkey (u/d). Returns buy info or None."""
-    color = G if direction == 'up' else R
-    name = 'UP' if direction == 'up' else 'DOWN'
-    print()
-    print(f"   {color}{B}⚡ MANUAL BUY {name} ${trade_amount:.0f}...{X}")
-
-    result, msg = execute_buy_market(client, direction, trade_amount, token_up, token_down)
+    result, msg = execute_buy_market(client, direction, trade_amount, token_up, token_down, quiet=True)
     exec_time = datetime.now().strftime("%H:%M:%S")
-    print(f"   [{exec_time}] {msg}")
 
     if result:
         sys.stdout.write('\a')
@@ -708,7 +709,6 @@ def execute_hotkey(client, direction, trade_amount, token_up, token_down):
             'time': exec_time,
         }
     else:
-        print(f"   {R}Buy failed{X}")
         return None
 
 
@@ -727,6 +727,26 @@ def main():
     session_start = time.time()
     session_start_str = datetime.now().strftime("%H:%M:%S")
     trade_history = []  # list of individual trade P&L values
+
+    # -- Donation banner --
+    DONATION_WALLET = "0xa27Bf6B2B26594f8A1BF6Ab50B00Ae0e503d71F6"
+    print()
+    print(f"  {Y}{B}{'═' * 62}{X}")
+    print(f"  {Y}{B}  If this tool helps you trade, consider supporting the dev!  {X}")
+    print(f"  {Y}{B}{'═' * 62}{X}")
+    print(f"  {D}  Built by a freelance developer in his spare time.{X}")
+    print(f"  {D}  Any amount helps keep this project alive and improving.{X}")
+    print(f"  {D}  Thank you for your support!{X}")
+    print(f"  {Y}{'─' * 62}{X}")
+    DONATION_URL = f"https://polymarket.com/profile/{DONATION_WALLET}"
+    print(f"  {W}Send a tip on Polymarket:{X}")
+    print(f"  {G}{DONATION_URL}{X}")
+    print(f"  {Y}{B}{'═' * 62}{X}")
+    for i in range(20, 0, -1):
+        print(f"\r  {D}Starting in {i}s...{X}", end="", flush=True)
+        time.sleep(1)
+    print(f"\r  {G}Let's go!        {X}")
+    print()
 
     # -- Connection (before clearing screen) --
     print(f"\n{C}{B}RADAR POLYMARKET - Connecting...{X}")
@@ -811,13 +831,15 @@ def main():
         trade_count = 0
         status_msg = ""
         status_clear_at = 0  # timestamp to clear status_msg
+        last_action = ""
 
         # Draw initial panel
         now_str = datetime.now().strftime("%H:%M:%S")
         draw_panel(now_str, balance, 0, '─', 0, {'rsi': 50, 'score': 0},
                    market_slug, time_remaining, 0, 0, positions, None, trade_amount,
                    session_pnl=session_pnl, trade_count=trade_count,
-                   price_to_beat=price_to_beat, trade_history=trade_history)
+                   price_to_beat=price_to_beat, trade_history=trade_history,
+                   last_action=last_action)
 
         print(f"   {D}Collecting initial data...{X}")
 
@@ -839,8 +861,19 @@ def main():
                             if positions:
                                 print(f"   {Y}{B}MARKET CHANGED → {new_slug} — clearing {len(positions)} old position(s){X}")
                                 for p in positions:
-                                    logger.log_trade("CLOSE", p['direction'], p['shares'], 0,
-                                                     0, "market_expired", 0, session_pnl)
+                                    token_id = token_up if p['direction'] == 'up' else token_down
+                                    try:
+                                        exit_price = get_price(token_id, "SELL")
+                                    except Exception:
+                                        exit_price = 0
+                                    pnl = (exit_price - p['price']) * p['shares'] if exit_price > 0 else 0
+                                    session_pnl += pnl
+                                    trade_count += 1
+                                    trade_history.append(pnl)
+                                    pnl_color = G if pnl >= 0 else R
+                                    print(f"   {Y}  expired {p['direction'].upper()} {p['shares']:.0f}sh @ ${p['price']:.2f} → ${exit_price:.2f} {pnl_color}P&L: {'+' if pnl >= 0 else ''}${pnl:.2f}{X}")
+                                    logger.log_trade("CLOSE", p['direction'], p['shares'], exit_price,
+                                                     p['shares'] * exit_price, "market_expired", pnl, session_pnl)
                                 positions.clear()
                             history.clear()
                             # Fetch new Price to Beat
@@ -927,7 +960,8 @@ def main():
                            session_pnl, trade_count,
                            regime=current_regime, phase=current_phase,
                            data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
-                           price_to_beat=price_to_beat, trade_history=trade_history)
+                           price_to_beat=price_to_beat, trade_history=trade_history,
+                           last_action=last_action)
 
                 # -- SCROLLING LOG --
                 s_dir = current_signal['direction']
@@ -949,9 +983,10 @@ def main():
                 col_btc    = f"BTC:{W}${btc_price:>7,.0f}{X}"
                 col_up     = f"UP:{G}${up_buy:.2f}{X}"
                 col_dn     = f"DN:{R}${down_buy:.2f}{X}"
-                col_rsi    = f"RSI:{rsi_val:>2.0f}{rsi_arrow}"
+                rsi_c = G if rsi_val < 40 else R if rsi_val > 60 else D
+                col_rsi    = f"{rsi_c}RSI:{rsi_val:>2.0f}{rsi_arrow}{X}"
                 col_signal = f"{color}{B}{sym} {s_dir:<7s} {strength:>3d}%{X}"
-                col_bar    = f"[{bar}]"
+                col_bar    = f"{color}[{bar}]{X}"
                 col_vol    = f"{Y}VOL↑{X}" if current_signal['high_vol'] else "    "
                 if abs(trend) > 0.3:
                     t_sym = '⬆' if trend > 0 else '⬇'
@@ -962,7 +997,8 @@ def main():
                     col_trend = f"{D}{'T: 0.0':<7s}{X}"
                 if sr_raw != 0:
                     sr_text = f"SR:{sr_raw:+.1f}→{sr_adj:+.1f}"
-                    col_sr = f"{M}{sr_text:<13s}{X}"
+                    sr_color = G if sr_raw > 0 else R
+                    col_sr = f"{sr_color}{sr_text:<13s}{X}"
                 else:
                     col_sr = f"{D}{'SR: 0.0':<13s}{X}"
 
@@ -990,11 +1026,11 @@ def main():
                 # Bollinger position column
                 bb_p = current_signal.get('bb_pos', 0.5)
                 bb_sq = current_signal.get('bb_squeeze', False)
-                bb_pct = f"{int(bb_p * 100):>2d}%"
-                if bb_p < 0.20:
-                    col_bb = f"{G}{'SQ' if bb_sq else 'LO'}{bb_pct}{X}"
-                elif bb_p > 0.80:
-                    col_bb = f"{R}{'SQ' if bb_sq else 'HI'}{bb_pct}{X}"
+                bb_pct = f"{int(bb_p * 100):>3d}%"
+                if bb_p > 0.80:
+                    col_bb = f"{G}{'SQ' if bb_sq else 'HI'}{bb_pct}{X}"
+                elif bb_p < 0.20:
+                    col_bb = f"{R}{'SQ' if bb_sq else 'LO'}{bb_pct}{X}"
                 else:
                     col_bb = f"{D}{'SQ' if bb_sq else 'MD'}{bb_pct}{X}"
 
@@ -1040,6 +1076,8 @@ def main():
                         trade_dir = 'up' if s_dir == 'UP' else 'down'
                         info = execute_hotkey(client, trade_dir, trade_amount, token_up, token_down)
                         if info:
+                            d_color = G if trade_dir == 'up' else R
+                            last_action = f"{d_color}{B}BUY {trade_dir.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}signal{X}"
                             positions.append(info)
                             balance -= info['price'] * info['shares']
                             logger.log_trade("BUY", trade_dir, info['shares'], info['price'],
@@ -1072,22 +1110,28 @@ def main():
                             logger.log_trade("CLOSE", trade_dir, info['shares'], exit_price,
                                              info['shares'] * exit_price, reason.lower(), pnl, session_pnl)
                             pnl_color = G if pnl >= 0 else R
+                            last_action = f"{exit_color}{B}{reason}{X} @ ${exit_price:.2f} │ {pnl_color}P&L: {'+' if pnl >= 0 else ''}${pnl:.2f}{X}"
                             print(f"   {pnl_color}{B}P&L: {'+' if pnl >= 0 else ''}${pnl:.2f} │ Session: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f} ({trade_count} trades){X}")
                             balance += exit_price * info['shares']
                             positions.clear()
                             print(f"   {D}Returning to radar...{X}")
                             print()
+                        else:
+                            last_action = f"{R}✗ BUY {trade_dir.upper()} FAILED{X}"
 
                         last_beep = time.time()
                     elif key in ('u', 'd'):
                         manual_dir = 'up' if key == 'u' else 'down'
                         info = execute_hotkey(client, manual_dir, trade_amount, token_up, token_down)
                         if info:
+                            d_color = G if manual_dir == 'up' else R
+                            last_action = f"{d_color}{B}BUY {manual_dir.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
                             positions.append(info)
                             balance -= info['price'] * info['shares']
                             logger.log_trade("BUY", manual_dir, info['shares'], info['price'],
                                              info['shares'] * info['price'], "manual", 0, session_pnl)
-                        print()
+                        else:
+                            last_action = f"{R}✗ BUY {manual_dir.upper()} FAILED{X}"
                     else:
                         print(f"   {D}Ignored.{X}")
                         print()
@@ -1119,7 +1163,9 @@ def main():
                         balance -= info['price'] * info['shares']
                         logger.log_trade("BUY", "up", info['shares'], info['price'],
                                          info['shares'] * info['price'], "manual", 0, session_pnl)
-                    print()
+                        last_action = f"{G}{B}BUY UP{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
+                    else:
+                        last_action = f"{R}✗ BUY UP FAILED{X}"
                 elif key == 'd':
                     info = execute_hotkey(client, 'down', trade_amount, token_up, token_down)
                     if info:
@@ -1127,10 +1173,13 @@ def main():
                         balance -= info['price'] * info['shares']
                         logger.log_trade("BUY", "down", info['shares'], info['price'],
                                          info['shares'] * info['price'], "manual", 0, session_pnl)
-                    print()
+                        last_action = f"{R}{B}BUY DOWN{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
+                    else:
+                        last_action = f"{R}✗ BUY DOWN FAILED{X}"
                 elif key == 'c':
                     # Show closing status in static panel
                     status_msg = f"{Y}{B}EMERGENCY CLOSE...{X}"
+                    last_action = f"{R}{B}EMERGENCY CLOSE{X}"
                     draw_panel(now_str, balance, btc_price, bin_direction, confidence,
                                binance_data, market_slug, current_time, up_buy,
                                down_buy, positions, current_signal, trade_amount,
@@ -1138,7 +1187,8 @@ def main():
                                session_pnl, trade_count,
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
-                               price_to_beat=price_to_beat, trade_history=trade_history)
+                               price_to_beat=price_to_beat, trade_history=trade_history,
+                               last_action=last_action)
                     msg = execute_close_market(client, token_up, token_down)
                     if positions:
                         for p in positions:
@@ -1155,6 +1205,7 @@ def main():
                     # Show result in static panel
                     pnl_color = G if session_pnl >= 0 else R
                     status_msg = f"{G}✓ Closed{X} │ {pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}"
+                    last_action = f"{G}✓ CLOSED{X} │ {pnl_color}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X}"
                     draw_panel(now_str, balance, btc_price, bin_direction, confidence,
                                binance_data, market_slug, current_time, up_buy,
                                down_buy, positions, current_signal, trade_amount,
@@ -1162,13 +1213,14 @@ def main():
                                session_pnl, trade_count,
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
-                               price_to_beat=price_to_beat, trade_history=trade_history)
+                               price_to_beat=price_to_beat, trade_history=trade_history,
+                               last_action=last_action)
                     status_clear_at = time.time() + 5
                 elif key == 'q':
                     raise KeyboardInterrupt
 
             except KeyboardInterrupt:
-                # Reset scroll region and clear screen before exit
+                # Reset scroll region, clear screen
                 sys.stdout.write("\033[r")
                 sys.stdout.write("\033[2J\033[H")
                 sys.stdout.flush()

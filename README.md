@@ -47,6 +47,7 @@ polymarket/
 - Python 3.10+
 - Polymarket account with exported private key
 - Terminal with ANSI color support (Windows Terminal, iTerm2, any Linux terminal)
+- Terminal window with at least **160 columns x 30 lines** (the layout may break on smaller screens)
 
 ### Quick Setup (Linux / macOS)
 
@@ -181,17 +182,19 @@ Open `.env` in any text editor and replace `0xYOUR_PRIVATE_KEY_HERE` with the pr
 
 ## Usage
 
+**Step 1:** Activate the virtual environment (required every new terminal session):
 ```bash
-# Activate virtual environment first
 source venv/bin/activate        # Linux/macOS
 venv\Scripts\activate.bat       # Windows
-
-# Run with default trade amount ($4 from .env)
-python radar_poly.py
-
-# Run with custom trade amount
-python radar_poly.py 10        # $10 per trade
 ```
+
+**Step 2:** Run the radar:
+```bash
+python radar_poly.py            # Default trade amount ($4 from .env)
+python radar_poly.py 10         # Custom: $10 per trade
+```
+
+> **Important:** You must run `source venv/bin/activate` before `python radar_poly.py`. Without the venv, dependencies like WebSocket won't work. The radar will show a warning if the venv is not activated.
 
 ### Hotkeys
 
@@ -234,7 +237,7 @@ All indicators use color to show their current state at a glance:
 | **Trend** | Positive (bullish) | Negative (bearish) | Near zero |
 | **MACD** | Histogram > 0 (bullish momentum) | Histogram < 0 (bearish momentum) | Near zero |
 | **VWAP** | Price above VWAP (bullish) | Price below VWAP (bearish) | At VWAP |
-| **Bollinger** | < 20% (near lower band / oversold) | > 80% (near upper band / overbought) | 20-80% (mid-band) |
+| **Bollinger** | > 80% (price strong / near upper band) | < 20% (price weak / near lower band) | 20-80% (mid-band) |
 | **S/R** | Positive (support zone) | Negative (resistance zone) | Neutral |
 | **Regime** | TREND UP | TREND DOWN | RANGE / CHOP |
 | **Signal** | UP direction | DOWN direction | NEUTRAL |
@@ -484,6 +487,18 @@ CSV logging module:
 - **Proxy wallet**: CREATE2 address derivation from Polymarket factory contract
 - **Regime detection**: ADX (Wilder's smoothing) + Bollinger bandwidth + SMA direction
 - **Log rotation**: Daily CSV files with automatic header creation
+
+## Support the Developer
+
+Built by a freelance developer in his spare time. If this tool helps you trade, consider sending a tip — any amount helps keep this project alive and improving.
+
+**Send a tip on Polymarket:**
+
+```
+https://polymarket.com/profile/0xa27Bf6B2B26594f8A1BF6Ab50B00Ae0e503d71F6
+```
+
+Thank you for your support!
 
 ## License
 
