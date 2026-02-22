@@ -18,21 +18,27 @@ except ImportError:
 from binance_api import get_klines
 
 
-# Binance WebSocket endpoints (try in order)
-WS_ENDPOINTS = [
-    "wss://stream.binance.com:9443/ws/btcusdt@kline_1m",
-    "wss://stream.binance.com:443/ws/btcusdt@kline_1m",
-]
-
 MAX_CANDLES = 30
 RECONNECT_DELAY_BASE = 2
 RECONNECT_DELAY_MAX = 30
 
 
+def _build_ws_endpoints(symbol="btcusdt", interval="1m"):
+    """Build WebSocket endpoint URLs for a given symbol."""
+    return [
+        f"wss://stream.binance.com:9443/ws/{symbol}@kline_{interval}",
+        f"wss://stream.binance.com:443/ws/{symbol}@kline_{interval}",
+    ]
+
+
 class BinanceWS:
     """Real-time Binance kline WebSocket with auto-reconnect and HTTP fallback."""
 
-    def __init__(self):
+    def __init__(self, symbol="btcusdt", interval="1m"):
+        self._symbol = symbol.lower()
+        self._interval = interval
+        self._binance_symbol = symbol.upper()  # e.g. BTCUSDT for HTTP fallback
+        self._ws_endpoints = _build_ws_endpoints(self._symbol, self._interval)
         self._candles = []        # completed candles buffer
         self._current = None      # candle still forming (live)
         self._lock = threading.Lock()
@@ -115,7 +121,7 @@ class BinanceWS:
 
         # Fallback to HTTP
         try:
-            candles = get_klines(interval="1m", limit=limit)
+            candles = get_klines(symbol=self._binance_symbol, interval="1m", limit=limit)
             # Always refresh buffer with HTTP data (keeps buffer fresh for WS recovery)
             with self._lock:
                 self._candles = candles[:-1]  # all except last (still forming)
@@ -133,7 +139,7 @@ class BinanceWS:
         """Main reconnection loop."""
         # Seed initial data via HTTP
         try:
-            candles = get_klines(interval="1m", limit=MAX_CANDLES)
+            candles = get_klines(symbol=self._binance_symbol, interval="1m", limit=MAX_CANDLES)
             if candles:
                 with self._lock:
                     self._candles = candles[:-1]
@@ -143,7 +149,7 @@ class BinanceWS:
             pass
 
         while self._running:
-            url = WS_ENDPOINTS[self._endpoint_idx % len(WS_ENDPOINTS)]
+            url = self._ws_endpoints[self._endpoint_idx % len(self._ws_endpoints)]
             try:
                 self._connect(url)
             except Exception:

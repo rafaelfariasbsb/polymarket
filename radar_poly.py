@@ -22,6 +22,7 @@ Usage:
 
 import sys
 import os
+import io
 import time
 import platform
 import shutil
@@ -63,6 +64,7 @@ if sys.prefix == sys.base_prefix:
 sys.stdout.reconfigure(line_buffering=True)
 
 sys.path.insert(0, os.path.dirname(__file__))
+from market_config import MarketConfig
 from binance_api import get_full_analysis, get_price_at_timestamp
 from polymarket_api import (
     create_client, find_current_market, get_token_position,
@@ -113,17 +115,48 @@ X = '\033[0m'
 
 HEADER_LINES = 15  # static panel lines
 
+# Persistent HTTP session (reuses TCP connections via keep-alive)
+_session = requests.Session()
+
+# Persistent thread pool (avoid recreating every cycle)
+_executor = ThreadPoolExecutor(max_workers=2)
+
+
+class PriceCache:
+    """TTL-based cache for get_price() to avoid duplicate HTTP calls."""
+
+    def __init__(self, ttl_sec=0.5):
+        self._cache = {}
+        self._ttl = ttl_sec
+
+    def get(self, token_id, side):
+        now = time.time()
+        key = (token_id, side)
+        if key in self._cache:
+            price, ts = self._cache[key]
+            if now - ts < self._ttl:
+                return price
+        try:
+            resp = _session.get(
+                f"{CLOB}/price",
+                params={"token_id": token_id, "side": side},
+                timeout=5,
+            )
+            price = float(resp.json()["price"])
+        except Exception:
+            price = 0.0
+        self._cache[key] = (price, now)
+        return price
+
+    def invalidate(self):
+        self._cache.clear()
+
+
+_price_cache = PriceCache(ttl_sec=0.5)
+
 
 def get_price(token_id, side):
-    try:
-        resp = requests.get(
-            f"{CLOB}/price",
-            params={"token_id": token_id, "side": side},
-            timeout=5,
-        )
-        return float(resp.json()["price"])
-    except Exception:
-        return 0.0
+    return _price_cache.get(token_id, side)
 
 
 def _ema(values, period):
@@ -137,17 +170,19 @@ def _ema(values, period):
     return ema
 
 
-def get_market_phase(time_remaining):
-    """Determine market phase based on time remaining in 15-min window.
+def get_market_phase(time_remaining, window_min=15):
+    """Determine market phase based on time remaining.
+    Thresholds are proportional to window size.
     Returns (phase_name, min_strength_threshold)."""
-    if time_remaining > 10:
+    pct = time_remaining / window_min if window_min > 0 else 0
+    if pct > 0.66:
         return 'EARLY', PHASE_EARLY_THRESHOLD
-    elif time_remaining > 5:
+    elif pct > 0.33:
         return 'MID', PHASE_MID_THRESHOLD
-    elif time_remaining > 1:
+    elif pct > 0.06:
         return 'LATE', PHASE_LATE_THRESHOLD
     else:
-        return 'CLOSING', 999  # last minute: NO trading
+        return 'CLOSING', 999  # last ~6%: NO trading
 
 
 def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='MID'):
@@ -162,12 +197,11 @@ def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='
     score = 0.0
     rsi = binance.get('rsi', 50)
     bin_score = binance.get('score', 0)
-    hist = list(history)
 
     # TREND FILTER (EMA of UP price)
     trend_strength = 0.0
-    if len(hist) >= 12:
-        up_prices = [h['up'] for h in hist[-20:] if h['up'] > 0]
+    if len(history) >= 12:
+        up_prices = [h['up'] for h in list(history)[-20:] if h['up'] > 0]
         if len(up_prices) >= 12:
             fast_ema = _ema(up_prices, 5)
             slow_ema = _ema(up_prices, 12)
@@ -189,8 +223,8 @@ def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='
     # 2. DIVERGENCE (20%) — BTC vs Polymarket
     div_score = 0.0
     btc_var = 0
-    if len(hist) >= 6:
-        h_old, h_new = hist[-6], hist[-1]
+    if len(history) >= 6:
+        h_old, h_new = history[-6], history[-1]
         if h_old['btc'] > 0 and h_old['up'] > 0:
             btc_var = (h_new['btc'] - h_old['btc']) / h_old['btc'] * 100
             poly_var = h_new['up'] - h_old['up']
@@ -203,8 +237,8 @@ def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='
     # 3. SUPPORT/RESISTANCE (10%) + TREND FILTER
     sr_score = 0.0
     sr_raw = 0.0
-    if len(hist) >= 10:
-        ups = [h['up'] for h in hist if h['up'] > 0]
+    if len(history) >= 10:
+        ups = [h['up'] for h in history if h['up'] > 0]
         if len(ups) >= 10:
             up_min, up_max = min(ups[-20:]), max(ups[-20:])
             range_ = up_max - up_min
@@ -380,6 +414,167 @@ def sleep_with_key(seconds):
     return None
 
 
+# --- Scrolling log formatter -----------------------------------------------------
+
+def format_scrolling_line(now_str, btc_price, up_buy, down_buy, signal, positions, regime, asset_name="BTC"):
+    """Format one line for the scrolling log area. Returns formatted string."""
+    s_dir = signal['direction']
+    strength = signal['strength']
+    rsi_val = signal['rsi']
+    trend = signal.get('trend', 0)
+    sr_raw = signal.get('sr_raw', 0)
+    sr_adj = signal.get('sr_adj', 0)
+
+    blocks = strength // 10
+    bar = '█' * blocks + '░' * (10 - blocks)
+    if s_dir == 'UP': color, sym = G, '▲'
+    elif s_dir == 'DOWN': color, sym = R, '▼'
+    else: color, sym = D, '─'
+    rsi_arrow = '↑' if rsi_val < 45 else '↓' if rsi_val > 55 else '─'
+
+    col_time   = f"{D}{now_str}{X}"
+    col_btc    = f"{asset_name}:{W}${btc_price:>7,.0f}{X}"
+    col_up     = f"UP:{G}${up_buy:.2f}{X}"
+    col_dn     = f"DN:{R}${down_buy:.2f}{X}"
+    rsi_c = G if rsi_val < 40 else R if rsi_val > 60 else D
+    col_rsi    = f"{rsi_c}RSI:{rsi_val:>3.0f}{rsi_arrow}{X}"
+    col_signal = f"{color}{B}{sym} {s_dir:<7s} {strength:>3d}%{X}"
+    col_bar    = f"{color}[{bar}]{X}"
+    col_vol    = f"{Y}VOL↑{X}" if signal['high_vol'] else "    "
+
+    if abs(trend) > 0.3:
+        t_sym = '⬆' if trend > 0 else '⬇'
+        t_color = G if trend > 0 else R
+        t_text = f"T:{trend:+.1f}{t_sym}"
+        col_trend = f"{t_color}{t_text:<7s}{X}"
+    else:
+        col_trend = f"{D}{'T: 0.0':<7s}{X}"
+
+    if sr_raw != 0:
+        sr_text = f"SR:{sr_raw:+.1f}→{sr_adj:+.1f}"
+        sr_color = G if sr_raw > 0 else R
+        col_sr = f"{sr_color}{sr_text:<13s}{X}"
+    else:
+        col_sr = f"{D}{'SR: 0.0':<13s}{X}"
+
+    # MACD column
+    macd_h = signal.get('macd_hist', 0)
+    macd_d = signal.get('macd_hist_delta', 0)
+    if macd_h > 0:
+        m_arrow = '▲' if macd_d > 0 else '▼' if macd_d < 0 else '─'
+        col_macd = f"{G}{macd_h:>+5.1f}{m_arrow}{X}"
+    elif macd_h < 0:
+        m_arrow = '▼' if macd_d < 0 else '▲' if macd_d > 0 else '─'
+        col_macd = f"{R}{macd_h:>+5.1f}{m_arrow}{X}"
+    else:
+        col_macd = f"{D}  0.0─{X}"
+
+    # VWAP column
+    v_pos = signal.get('vwap_pos', 0)
+    if v_pos > 0.02:
+        col_vwap = f"{G}{v_pos:>+5.2f}↑{X}"
+    elif v_pos < -0.02:
+        col_vwap = f"{R}{v_pos:>+5.2f}↓{X}"
+    else:
+        col_vwap = f"{D} 0.00─{X}"
+
+    # Bollinger position column
+    bb_p = signal.get('bb_pos', 0.5)
+    bb_sq = signal.get('bb_squeeze', False)
+    bb_pct = f"{int(bb_p * 100):>3d}%"
+    if bb_p > 0.80:
+        col_bb = f"{G}{'SQ' if bb_sq else 'HI'}{bb_pct}{X}"
+    elif bb_p < 0.20:
+        col_bb = f"{R}{'SQ' if bb_sq else 'LO'}{bb_pct}{X}"
+    else:
+        col_bb = f"{D}{'SQ' if bb_sq else 'MD'}{bb_pct}{X}"
+
+    # Position tag
+    pos_str = ""
+    if positions:
+        total_shares = sum(p['shares'] for p in positions)
+        dirs = set(p['direction'] for p in positions)
+        d_str = '/'.join(d.upper() for d in dirs)
+        pos_str = f" {M}{B}[{d_str} {total_shares:.0f}sh]{X}"
+
+    # Regime tag
+    if regime == 'TREND_UP':
+        col_regime = f"{G}T▲{X}"
+    elif regime == 'TREND_DOWN':
+        col_regime = f"{R}T▼{X}"
+    elif regime == 'CHOP':
+        col_regime = f"{Y}CH{X}"
+    else:
+        col_regime = f"{D}RG{X}"
+
+    return f"   {col_time} │ {col_btc} │ {col_up} {col_dn} │ {col_rsi} │ {col_signal} {col_bar} │ {col_vol} │ {col_trend} │ {col_macd} │ {col_vwap} │ {col_bb} │ {col_sr} │ {col_regime}{pos_str}"
+
+
+# --- Session stats ---------------------------------------------------------------
+
+def calculate_session_stats(trade_history):
+    """Calculate session statistics from trade history.
+
+    Returns dict with: wins, losses, win_rate, best, worst,
+    gross_wins, gross_losses, profit_factor, max_drawdown.
+    """
+    if not trade_history:
+        return {
+            'wins': 0, 'losses': 0, 'win_rate': 0, 'best': 0, 'worst': 0,
+            'gross_wins': 0, 'gross_losses': 0, 'profit_factor': 0, 'max_drawdown': 0,
+        }
+    wins = sum(1 for t in trade_history if t > 0)
+    losses = sum(1 for t in trade_history if t <= 0)
+    win_rate = (wins / len(trade_history) * 100) if trade_history else 0
+    best = max(trade_history)
+    worst = min(trade_history)
+    gross_wins = sum(t for t in trade_history if t > 0)
+    gross_losses = abs(sum(t for t in trade_history if t < 0))
+    profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else gross_wins
+    # Max drawdown
+    max_dd = 0.0
+    peak = 0.0
+    cumul = 0.0
+    for t in trade_history:
+        cumul += t
+        if cumul > peak:
+            peak = cumul
+        dd = peak - cumul
+        if dd > max_dd:
+            max_dd = dd
+    return {
+        'wins': wins, 'losses': losses, 'win_rate': win_rate,
+        'best': best, 'worst': worst,
+        'gross_wins': gross_wins, 'gross_losses': gross_losses,
+        'profit_factor': profit_factor, 'max_drawdown': max_dd,
+    }
+
+
+def print_session_summary(duration_min, trade_count, session_pnl, trade_history):
+    """Print formatted session summary to terminal."""
+    stats = calculate_session_stats(trade_history)
+    print()
+    print(f" {C}{B}{'═' * 45}{X}")
+    print(f" {C}{B} SESSION SUMMARY{X}")
+    print(f" {D}{'─' * 45}{X}")
+    print(f"  Duration:       {duration_min:.0f} min")
+    print(f"  Total Trades:   {trade_count}")
+    if trade_history:
+        wr_color = G if stats['win_rate'] >= 50 else R
+        print(f"  Win Rate:       {wr_color}{stats['win_rate']:.0f}%{X} ({G}{stats['wins']}W{X} / {R}{stats['losses']}L{X})")
+        pnl_c = G if session_pnl >= 0 else R
+        print(f"  Total P&L:      {pnl_c}{'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X}")
+        print(f"  Best Trade:     {G}+${stats['best']:.2f}{X}")
+        print(f"  Worst Trade:    {R}${stats['worst']:.2f}{X}")
+        print(f"  Profit Factor:  {W}{stats['profit_factor']:.2f}{X}")
+        print(f"  Max Drawdown:   {R}-${stats['max_drawdown']:.2f}{X}")
+    else:
+        print(f"  {D}No trades this session{X}")
+    print(f" {C}{B}{'═' * 45}{X}")
+    print()
+    return stats
+
+
 # --- Static panel ----------------------------------------------------------------
 
 def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_data,
@@ -387,31 +582,29 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
                trade_amount, alert_active=False, alert_side="", alert_price=0.0,
                session_pnl=0.0, trade_count=0, regime="", phase="",
                data_source="http", status_msg="", price_to_beat=0.0, ws_status="",
-               trade_history=None, last_action=""):
-    """Redraws the static panel at the top (HEADER_LINES lines)."""
+               trade_history=None, last_action="", asset_name="BTC",
+               poly_latency_ms=0):
+    """Redraws the static panel at the top (HEADER_LINES lines).
+    Uses StringIO buffer for single write+flush (reduces terminal I/O)."""
     w = shutil.get_terminal_size().columns
+    buf = io.StringIO()
 
-    sys.stdout.write("\033[s")  # save cursor
+    buf.write("\033[s")  # save cursor
 
     # Line 1: title bar
-    sys.stdout.write(f"\033[1;1H\033[K")
-    sys.stdout.write(f" {C}{B}{'═' * (w - 2)}{X}")
+    buf.write(f"\033[1;1H\033[K {C}{B}{'═' * (w - 2)}{X}")
 
     # Line 2: header with time and balance
-    sys.stdout.write(f"\033[2;1H\033[K")
-    sys.stdout.write(f" {C}{B}RADAR POLYMARKET{X} │ {W}{time_str}{X} │ Balance: {G}${balance:.2f}{X} │ Trade: {W}${trade_amount:.0f}{X}")
+    buf.write(f"\033[2;1H\033[K {C}{B}RADAR POLYMARKET{X} │ {W}{time_str}{X} │ Balance: {G}${balance:.2f}{X} │ Trade: {W}${trade_amount:.0f}{X}")
 
     # Line 3: separator
-    sys.stdout.write(f"\033[3;1H\033[K")
-    sys.stdout.write(f" {C}{'═' * (w - 2)}{X}")
+    buf.write(f"\033[3;1H\033[K {C}{'═' * (w - 2)}{X}")
 
     # Line 4: Binance
     bin_color = G if bin_direction == 'UP' else R if bin_direction == 'DOWN' else D
     rsi_val = binance_data.get('rsi', 50)
     score_bin = binance_data.get('score', 0)
-    vol_pct = signal.get('vol_pct', 0) if signal else 0
     vol_str = f"{Y}HIGH{X}" if (signal and signal.get('high_vol')) else f"{D}normal{X}"
-    sys.stdout.write(f"\033[4;1H\033[K")
     # Regime indicator
     if regime == 'TREND_UP':
         reg_str = f"{G}{B}TREND▲{X}"
@@ -427,12 +620,10 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         src_str = f"{D}HTTP{X} {Y}{ws_status}{X}"
     else:
         src_str = f"{D}HTTP{X}"
-    sys.stdout.write(f" {C}BINANCE {X}│ BTC: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str} │ {src_str}")
+    buf.write(f"\033[4;1H\033[K {C}BINANCE {X}│ {asset_name}: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str} │ {src_str}")
 
     # Line 5: Market
-    sys.stdout.write(f"\033[5;1H\033[K")
     time_color = R if time_remaining < 2 else Y if time_remaining < 5 else G
-    # Phase indicator
     if phase == 'EARLY':
         phase_str = f"{C}EARLY{X}"
     elif phase == 'MID':
@@ -443,22 +634,19 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         phase_str = f"{R}{B}CLOSING{X}"
     else:
         phase_str = f"{D}─{X}"
-    # Price to Beat info
     ptb_str = ""
     if price_to_beat > 0 and btc_price > 0:
         diff = btc_price - price_to_beat
         diff_color = G if diff >= 0 else R
         ptb_str = f" │ Beat: {W}${price_to_beat:,.2f}{X} ({diff_color}{diff:+,.2f}{X})"
-    sys.stdout.write(f" {Y}MARKET  {X}│ {market_slug} │ Closes in: {time_color}{time_remaining:.1f}min{X} │ {phase_str}{ptb_str}")
+    poly_lat_str = f" │ Poly:{Y}{poly_latency_ms:.0f}ms{X}" if poly_latency_ms > 0 else ""
+    buf.write(f"\033[5;1H\033[K {Y}MARKET  {X}│ {market_slug} │ Closes in: {time_color}{time_remaining:.1f}min{X} │ {phase_str}{ptb_str}{poly_lat_str}")
 
     # Line 6: Polymarket
-    sys.stdout.write(f"\033[6;1H\033[K")
-    sys.stdout.write(f" {G}POLY    {X}│ UP: {G}${up_buy:.2f}{X}/{G}${1.0 - down_buy:.2f}{X} ({G}{up_buy * 100:.0f}%{X}) │ DOWN: {R}${down_buy:.2f}{X}/{R}${1.0 - up_buy:.2f}{X} ({R}{down_buy * 100:.0f}%{X})")
+    buf.write(f"\033[6;1H\033[K {G}POLY    {X}│ UP: {G}${up_buy:.2f}{X}/{G}${1.0 - down_buy:.2f}{X} ({G}{up_buy * 100:.0f}%{X}) │ DOWN: {R}${down_buy:.2f}{X}/{R}${1.0 - up_buy:.2f}{X} ({R}{down_buy * 100:.0f}%{X})")
 
     # Line 7: Positions + Session P&L
-    sys.stdout.write(f"\033[7;1H\033[K")
     pnl_color = G if session_pnl >= 0 else R
-    # Compute running stats from trade_history
     th = trade_history or []
     stats_str = ""
     if th:
@@ -472,7 +660,6 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         stats_str = f" │ {wr_color}WR:{wr:.0f}%{X}({G}{wins}W{X}/{R}{losses}L{X}) │ {W}PF:{pf:.1f}{X}"
     pnl_str = f"{pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}{stats_str}"
     if positions:
-        # Aggregate by direction: total shares + weighted average price
         agg = {}
         for p in positions:
             d = p['direction']
@@ -486,19 +673,18 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
             avg_price = agg[d]['cost'] / total_sh if total_sh > 0 else 0
             p_color = G if d == 'up' else R
             parts.append(f"{p_color}{d.upper()} {total_sh:.0f}sh @ ${avg_price:.2f}{X}")
-        sys.stdout.write(f" {M}POSITION{X}│ {' │ '.join(parts)} │ {pnl_str}")
+        buf.write(f"\033[7;1H\033[K {M}POSITION{X}│ {' │ '.join(parts)} │ {pnl_str}")
     else:
-        sys.stdout.write(f" {M}POSITION{X}│ {D}None{X} │ {pnl_str}")
+        buf.write(f"\033[7;1H\033[K {M}POSITION{X}│ {D}None{X} │ {pnl_str}")
 
     # Line 8: Last action
-    sys.stdout.write(f"\033[8;1H\033[K")
     if last_action:
-        sys.stdout.write(f" {W}ACTION  {X}│ {last_action}")
+        buf.write(f"\033[8;1H\033[K {W}ACTION  {X}│ {last_action}")
     else:
-        sys.stdout.write(f" {D}ACTION  {X}│ {D}─{X}")
+        buf.write(f"\033[8;1H\033[K {D}ACTION  {X}│ {D}─{X}")
 
     # Line 9: Signal
-    sys.stdout.write(f"\033[9;1H\033[K")
+    buf.write(f"\033[9;1H\033[K")
     if signal:
         s_dir = signal['direction']
         strength = signal['strength']
@@ -508,8 +694,6 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         elif s_dir == 'DOWN': s_color, s_sym = R, '▼'
         else: s_color, s_sym = D, '─'
         trend = signal.get('trend', 0)
-        sr_raw = signal.get('sr_raw', 0)
-        sr_adj = signal.get('sr_adj', 0)
         rsi_s = signal.get('rsi', 50)
         rsi_arrow = '↑' if rsi_s < 45 else '↓' if rsi_s > 55 else '─'
         rsi_color = G if rsi_s < 40 else R if rsi_s > 60 else D
@@ -523,41 +707,105 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         bb_p = signal.get('bb_pos', 0.5)
         bb_color = G if bb_p > 0.80 else R if bb_p < 0.20 else D
         bb_str = f"{bb_color}BB:{bb_p:.0%}{X}"
-        sys.stdout.write(f" {W}SIGNAL  {X}│ {s_color}{B}{s_sym} {s_dir:<7s} {strength:>3d}%{X} [{bar_s}] │ {rsi_color}RSI:{rsi_s:.0f}{rsi_arrow}{X} │ {t_str} │ {macd_str} │ {vwap_str} │ {bb_str}")
+        buf.write(f" {W}SIGNAL  {X}│ {s_color}{B}{s_sym} {s_dir:<7s} {strength:>3d}%{X} [{bar_s}] │ {rsi_color}RSI:{rsi_s:.0f}{rsi_arrow}{X} │ {t_str} │ {macd_str} │ {vwap_str} │ {bb_str}")
     else:
-        sys.stdout.write(f" {W}SIGNAL  {X}│ {D}Waiting for data...{X}")
+        buf.write(f" {W}SIGNAL  {X}│ {D}Waiting for data...{X}")
 
     # Line 10: Alert / Status message
-    sys.stdout.write(f"\033[10;1H\033[K")
+    buf.write(f"\033[10;1H\033[K")
     if status_msg:
-        sys.stdout.write(f" {Y}{B}STATUS  {X}│ {status_msg}")
+        buf.write(f" {Y}{B}STATUS  {X}│ {status_msg}")
     elif alert_active:
         alert_color = G if alert_side == "UP" else R
-        sys.stdout.write(f" {Y}{B}ALERT   {X}│ {alert_color}{B}{alert_side} @ ${alert_price:.2f}{X} (>= ${PRICE_ALERT:.2f})")
+        buf.write(f" {Y}{B}ALERT   {X}│ {alert_color}{B}{alert_side} @ ${alert_price:.2f}{X} (>= ${PRICE_ALERT:.2f})")
     else:
-        sys.stdout.write(f" {D}ALERT   {X}│ {D}─{X}")
+        buf.write(f" {D}ALERT   {X}│ {D}─{X}")
 
     # Line 11: separator
-    sys.stdout.write(f"\033[11;1H\033[K")
-    sys.stdout.write(f" {'─' * (w - 2)}")
+    buf.write(f"\033[11;1H\033[K {'─' * (w - 2)}")
 
     # Line 12: Hotkeys
-    sys.stdout.write(f"\033[12;1H\033[K")
-    sys.stdout.write(f" {W}{B}U{X}{D}=buy UP{X} │ {W}{B}D{X}{D}=buy DOWN{X} │ {W}{B}C{X}{D}=close all{X} │ {W}{B}S{X}{D}=accept signal{X} │ {W}{B}Q{X}{D}=exit{X}")
+    buf.write(f"\033[12;1H\033[K {W}{B}U{X}{D}=buy UP{X} │ {W}{B}D{X}{D}=buy DOWN{X} │ {W}{B}C{X}{D}=close all{X} │ {W}{B}S{X}{D}=accept signal{X} │ {W}{B}Q{X}{D}=exit{X}")
 
-    # Line 13: bottom separator (full width)
-    sys.stdout.write(f"\033[13;1H\033[K")
-    sys.stdout.write(f" {C}{B}{'═' * (w - 2)}{X}")
+    # Line 13: bottom separator
+    buf.write(f"\033[13;1H\033[K {C}{B}{'═' * (w - 2)}{X}")
 
     # Line 14: column headers
-    sys.stdout.write(f"\033[14;1H\033[K")
-    sys.stdout.write(f"   {D}{'TIME':8s} │ {'BTC':>12s} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>7s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>6s} │ {'S/R':>13s} │ {'REGIME':6s}{X}")
+    col_asset = f"{asset_name:>12s}"
+    buf.write(f"\033[14;1H\033[K   {D}{'TIME':8s} │ {col_asset} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>7s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>6s} │ {'S/R':>13s} │ {'REGIME':6s}{X}")
 
-    # Line 15: blank (space before log)
-    sys.stdout.write(f"\033[15;1H\033[K")
+    # Line 15: blank
+    buf.write(f"\033[15;1H\033[K")
 
-    sys.stdout.write("\033[u")  # restore cursor
+    buf.write("\033[u")  # restore cursor
+
+    # Single write + flush
+    sys.stdout.write(buf.getvalue())
     sys.stdout.flush()
+
+
+# --- Trade helpers ---------------------------------------------------------------
+
+def close_all_positions(positions, token_up, token_down, logger, reason, session_pnl, trade_history):
+    """Close all positions and calculate P&L for each.
+
+    Args:
+        positions: list of position dicts
+        token_up/token_down: token IDs
+        logger: RadarLogger instance
+        reason: str — 'market_expired', 'emergency', 'exit', 'tp', 'sl', 'cancel'
+        session_pnl: current cumulative P&L
+        trade_history: list of individual trade P&L values
+
+    Returns:
+        (total_pnl, count, updated_session_pnl, pnl_list)
+        pnl_list: list of (direction, shares, entry_price, exit_price, pnl) per position
+    """
+    total_pnl = 0.0
+    count = 0
+    pnl_list = []
+
+    for p in positions:
+        token_id = token_up if p['direction'] == 'up' else token_down
+        try:
+            exit_price = get_price(token_id, "SELL")
+        except Exception:
+            exit_price = 0
+        pnl = (exit_price - p['price']) * p['shares'] if exit_price > 0 else 0
+        total_pnl += pnl
+        count += 1
+        session_pnl += pnl
+        trade_history.append(pnl)
+        pnl_list.append((p['direction'], p['shares'], p['price'], exit_price, pnl))
+        logger.log_trade("CLOSE", p['direction'], p['shares'], exit_price,
+                         p['shares'] * exit_price, reason, pnl, session_pnl)
+
+    positions.clear()
+    return total_pnl, count, session_pnl, pnl_list
+
+
+def handle_buy(client, direction, trade_amount, token_up, token_down,
+               positions, balance, logger, session_pnl, reason="manual"):
+    """Execute buy and update state. Returns (info, balance, last_action).
+
+    Args:
+        direction: 'up' or 'down'
+        reason: 'signal' or 'manual'
+
+    Returns:
+        (info_dict_or_None, updated_balance, last_action_str)
+    """
+    info = execute_hotkey(client, direction, trade_amount, token_up, token_down)
+    if info:
+        d_color = G if direction == 'up' else R
+        last_action = f"{d_color}{B}BUY {direction.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}{reason}{X}"
+        positions.append(info)
+        balance -= info['price'] * info['shares']
+        logger.log_trade("BUY", direction, info['shares'], info['price'],
+                         info['shares'] * info['price'], reason, 0, session_pnl)
+    else:
+        last_action = f"{R}✗ BUY {direction.upper()} FAILED{X}"
+    return info, balance, last_action
 
 
 # --- Trade execution -------------------------------------------------------------
@@ -640,7 +888,7 @@ def execute_close_market(client, token_up, token_down):
                 resp = client.post_order(order, orderType=OrderType.GTC)
                 order_id = resp.get("orderID") or resp.get("id") if isinstance(resp, dict) else None
                 if order_id:
-                    status, details = monitor_order(client, order_id, interval=1, timeout_sec=15)
+                    status, details = monitor_order(client, order_id, interval=1, timeout_sec=15, quiet=True)
                     if status == "FILLED":
                         sm = float(details.get("size_matched", 0)) if details else 0
                         p = float(details.get("price", 0)) if details else market_price
@@ -658,11 +906,23 @@ def execute_close_market(client, token_up, token_down):
 # --- TP/SL monitoring ------------------------------------------------------------
 
 def monitor_tp_sl(token_id, tp, sl, tp_above, sl_above):
-    """Monitor price every 0.5s until TP, SL, or manual cancel (C key). Returns reason and price."""
+    """Monitor price until TP, SL, or manual cancel (C key).
+    Uses concurrent price fetch + key checking for lower latency."""
+    price = 0.0
     while True:
-        price = get_price(token_id, "BUY")
+        # Fetch price concurrently while checking keys
+        fut_price = _executor.submit(get_price, token_id, "BUY")
+
+        # Check keys while waiting for price (5 × 0.1s = 0.5s)
+        for _ in range(5):
+            key = read_key_nb()
+            if key == 'c':
+                fut_price.result()  # don't leak the future
+                return 'CANCEL', price if price > 0 else get_price(token_id, "BUY")
+            time.sleep(0.1)
+
+        price = fut_price.result()
         if price <= 0:
-            time.sleep(0.5)
             continue
 
         now = datetime.now().strftime("%H:%M:%S")
@@ -683,13 +943,6 @@ def monitor_tp_sl(token_id, tp, sl, tp_above, sl_above):
         bar = f"{G}{'█' * bar_pos}{X}{R}{'█' * (10 - bar_pos)}{X}"
         sys.stdout.write(f"\r   {D}{now}{X} | ${price:.2f} | SL ${sl:.2f} [{bar}] TP ${tp:.2f} │ {D}C=close{X}   ")
         sys.stdout.flush()
-
-        # Check for cancel key (C) — 5 checks over 0.5s
-        for _ in range(5):
-            key = read_key_nb()
-            if key == 'c':
-                return 'CANCEL', price
-            time.sleep(0.1)
 
 
 # --- Hotkey buy ------------------------------------------------------------------
@@ -722,14 +975,33 @@ def main():
         except ValueError:
             pass
 
+    # -- Market config --
+    try:
+        config = MarketConfig()
+    except ValueError as e:
+        print(f"\033[91m{e}\033[0m")
+        return
+
     # -- Logger --
     logger = RadarLogger()
     session_start = time.time()
     session_start_str = datetime.now().strftime("%H:%M:%S")
     trade_history = []  # list of individual trade P&L values
 
-    # -- Donation banner --
+    # -- Clear screen and donation banner --
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
     DONATION_WALLET = "0xa27Bf6B2B26594f8A1BF6Ab50B00Ae0e503d71F6"
+    print()
+    print(f"  {C}{B}{'═' * 62}{X}")
+    print(f"  {C}{B}  POLYMARKET CRYPTO SCALPING RADAR{X}")
+    print(f"  {C}{'─' * 62}{X}")
+    print(f"  {W}  Real-time scalping tool for Polymarket updown markets.{X}")
+    print(f"  {W}  Monitors Binance price + 6 indicators (RSI, MACD, VWAP,{X}")
+    print(f"  {W}  Bollinger, S/R, ADX) to generate UP/DOWN signals with{X}")
+    print(f"  {W}  regime detection and phase-aware thresholds.{X}")
+    print(f"  {D}  Asset: {G}{config.display_name}{D} │ Window: {G}{config.window_min}m{D} │ Trade: {G}${trade_amount:.0f}{X}")
+    print(f"  {C}{'═' * 62}{X}")
     print()
     print(f"  {Y}{B}{'═' * 62}{X}")
     print(f"  {Y}{B}  If this tool helps you trade, consider supporting the dev!  {X}")
@@ -749,7 +1021,7 @@ def main():
     print()
 
     # -- Connection (before clearing screen) --
-    print(f"\n{C}{B}RADAR POLYMARKET - Connecting...{X}")
+    print(f"\n{C}{B}RADAR POLYMARKET - {config.display_name} {config.window_min}m - Connecting...{X}")
 
     print(f"   Connecting to Polymarket...", end="", flush=True)
     try:
@@ -760,27 +1032,27 @@ def main():
         print(f" {R}✗{X} {e}")
         return
 
-    print(f"   Finding market...", end="", flush=True)
+    print(f"   Finding {config.display_name} {config.window_min}m market...", end="", flush=True)
     try:
-        event, market, token_up, token_down, time_remaining = find_current_market()
+        event, market, token_up, token_down, time_remaining = find_current_market(config)
         market_slug = event.get("slug", "")
         print(f" {G}✓{X} {market_slug}")
     except Exception as e:
         print(f" {R}✗{X} {e}")
         return
 
-    # Get Price to Beat (BTC price at window start)
+    # Get Price to Beat (asset price at window start)
     price_to_beat = 0.0
     try:
         window_ts = int(market_slug.split('-')[-1])
-        price_to_beat = get_price_at_timestamp(window_ts)
+        price_to_beat = get_price_at_timestamp(window_ts, symbol=config.binance_symbol)
         if price_to_beat > 0:
             print(f"   Price to Beat: {G}${price_to_beat:,.2f}{X}")
     except Exception:
         pass
 
     # Start Binance WebSocket
-    binance_ws = BinanceWS()
+    binance_ws = BinanceWS(symbol=config.ws_symbol)
     print(f"   Connecting to Binance WS...", end="", flush=True)
     ws_started = binance_ws.start()
     if ws_started:
@@ -829,6 +1101,7 @@ def main():
         alert_price = 0.0
         session_pnl = 0.0
         trade_count = 0
+        poly_latency_ms = 0
         status_msg = ""
         status_clear_at = 0  # timestamp to clear status_msg
         last_action = ""
@@ -839,7 +1112,7 @@ def main():
                    market_slug, time_remaining, 0, 0, positions, None, trade_amount,
                    session_pnl=session_pnl, trade_count=trade_count,
                    price_to_beat=price_to_beat, trade_history=trade_history,
-                   last_action=last_action)
+                   last_action=last_action, asset_name=config.display_name)
 
         print(f"   {D}Collecting initial data...{X}")
 
@@ -854,32 +1127,24 @@ def main():
                 # Refresh market every 60s
                 if now - last_market_check > 60:
                     try:
-                        event, market, new_token_up, new_token_down, time_remaining = find_current_market()
+                        event, market, new_token_up, new_token_down, time_remaining = find_current_market(config)
                         new_slug = event.get("slug", "")
                         # Detect market transition (new 15-min window)
                         if new_slug != market_slug:
                             if positions:
                                 print(f"   {Y}{B}MARKET CHANGED → {new_slug} — clearing {len(positions)} old position(s){X}")
-                                for p in positions:
-                                    token_id = token_up if p['direction'] == 'up' else token_down
-                                    try:
-                                        exit_price = get_price(token_id, "SELL")
-                                    except Exception:
-                                        exit_price = 0
-                                    pnl = (exit_price - p['price']) * p['shares'] if exit_price > 0 else 0
-                                    session_pnl += pnl
-                                    trade_count += 1
-                                    trade_history.append(pnl)
+                                total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
+                                    positions, token_up, token_down, logger, "market_expired",
+                                    session_pnl, trade_history)
+                                trade_count += cnt
+                                for d, sh, ep, xp, pnl in pnl_list:
                                     pnl_color = G if pnl >= 0 else R
-                                    print(f"   {Y}  expired {p['direction'].upper()} {p['shares']:.0f}sh @ ${p['price']:.2f} → ${exit_price:.2f} {pnl_color}P&L: {'+' if pnl >= 0 else ''}${pnl:.2f}{X}")
-                                    logger.log_trade("CLOSE", p['direction'], p['shares'], exit_price,
-                                                     p['shares'] * exit_price, "market_expired", pnl, session_pnl)
-                                positions.clear()
+                                    print(f"   {Y}  expired {d.upper()} {sh:.0f}sh @ ${ep:.2f} → ${xp:.2f} {pnl_color}P&L: {'+' if pnl >= 0 else ''}${pnl:.2f}{X}")
                             history.clear()
                             # Fetch new Price to Beat
                             try:
                                 window_ts = int(new_slug.split('-')[-1])
-                                price_to_beat = get_price_at_timestamp(window_ts)
+                                price_to_beat = get_price_at_timestamp(window_ts, symbol=config.binance_symbol)
                             except Exception:
                                 price_to_beat = 0.0
                             status_msg = f"{Y}MARKET SWITCHED → {new_slug}{X}"
@@ -904,9 +1169,9 @@ def main():
                 try:
                     ws_candles, data_source = binance_ws.get_candles(limit=20)
                     if ws_candles and len(ws_candles) >= 5:
-                        bin_direction, confidence, details = get_full_analysis(candles=ws_candles)
+                        bin_direction, confidence, details = get_full_analysis(candles=ws_candles, symbol=config.binance_symbol)
                     else:
-                        bin_direction, confidence, details = get_full_analysis()
+                        bin_direction, confidence, details = get_full_analysis(symbol=config.binance_symbol)
                         data_source = 'http'
                     btc_price = details.get('btc_price', 0)
                     binance_data = {
@@ -921,23 +1186,42 @@ def main():
                         'bb_squeeze': details.get('bb_squeeze', False),
                     }
                     current_regime = details.get('regime', 'RANGE')
-                except Exception:
-                    key = sleep_with_key(2)
-                    if key:
-                        pass
+                except Exception as e:
+                    now_str = datetime.now().strftime("%H:%M:%S")
+                    print(f"   {D}{now_str}{X} │ {Y}Binance data error: {e}{X}")
+                    draw_panel(now_str, balance, 0, '─', 0, {'rsi': 50, 'score': 0},
+                               market_slug, current_time, 0, 0, positions, None, trade_amount,
+                               session_pnl=session_pnl, trade_count=trade_count,
+                               status_msg=f"{Y}Binance error — retrying...{X}",
+                               price_to_beat=price_to_beat, trade_history=trade_history,
+                               last_action=last_action, asset_name=config.display_name)
+                    sleep_with_key(2)
                     continue
 
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    fut_up = pool.submit(get_price, token_up, "BUY")
-                    fut_dn = pool.submit(get_price, token_down, "BUY")
-                    up_buy = fut_up.result()
-                    down_buy = fut_dn.result()
+                _poly_t0 = time.time()
+                fut_up = _executor.submit(get_price, token_up, "BUY")
+                fut_dn = _executor.submit(get_price, token_down, "BUY")
+                up_buy = fut_up.result()
+                down_buy = fut_dn.result()
+                poly_latency_ms = (time.time() - _poly_t0) * 1000
                 if up_buy <= 0:
+                    now_str = datetime.now().strftime("%H:%M:%S")
+                    print(f"   {D}{now_str}{X} │ {Y}Token price unavailable (UP=${up_buy:.2f} DN=${down_buy:.2f}) — retrying...{X}")
+                    draw_panel(now_str, balance, btc_price, bin_direction, confidence,
+                               binance_data, market_slug, current_time, up_buy,
+                               down_buy, positions, None, trade_amount,
+                               session_pnl=session_pnl, trade_count=trade_count,
+                               regime=current_regime, data_source=data_source,
+                               status_msg=f"{Y}Token prices unavailable — retrying...{X}",
+                               ws_status=binance_ws.status,
+                               price_to_beat=price_to_beat, trade_history=trade_history,
+                               last_action=last_action, asset_name=config.display_name,
+                               poly_latency_ms=poly_latency_ms)
                     sleep_with_key(2)
                     continue
 
                 # Market phase
-                current_phase, phase_threshold = get_market_phase(current_time)
+                current_phase, phase_threshold = get_market_phase(current_time, config.window_min)
 
                 # Compute signal v2 (regime + phase aware)
                 current_signal = compute_signal(up_buy, down_buy, btc_price, binance_data,
@@ -961,98 +1245,23 @@ def main():
                            regime=current_regime, phase=current_phase,
                            data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                            price_to_beat=price_to_beat, trade_history=trade_history,
-                           last_action=last_action)
+                           last_action=last_action, asset_name=config.display_name,
+                           poly_latency_ms=poly_latency_ms)
 
                 # -- SCROLLING LOG --
                 s_dir = current_signal['direction']
                 strength = current_signal['strength']
-                rsi_val = current_signal['rsi']
                 sug = current_signal.get('suggestion')
                 trend = current_signal.get('trend', 0)
                 sr_raw = current_signal.get('sr_raw', 0)
                 sr_adj = current_signal.get('sr_adj', 0)
-
-                blocks = strength // 10
-                bar = '█' * blocks + '░' * (10 - blocks)
                 if s_dir == 'UP': color, sym = G, '▲'
                 elif s_dir == 'DOWN': color, sym = R, '▼'
                 else: color, sym = D, '─'
-                rsi_arrow = '↑' if rsi_val < 45 else '↓' if rsi_val > 55 else '─'
 
-                col_time   = f"{D}{now_str}{X}"
-                col_btc    = f"BTC:{W}${btc_price:>7,.0f}{X}"
-                col_up     = f"UP:{G}${up_buy:.2f}{X}"
-                col_dn     = f"DN:{R}${down_buy:.2f}{X}"
-                rsi_c = G if rsi_val < 40 else R if rsi_val > 60 else D
-                col_rsi    = f"{rsi_c}RSI:{rsi_val:>2.0f}{rsi_arrow}{X}"
-                col_signal = f"{color}{B}{sym} {s_dir:<7s} {strength:>3d}%{X}"
-                col_bar    = f"{color}[{bar}]{X}"
-                col_vol    = f"{Y}VOL↑{X}" if current_signal['high_vol'] else "    "
-                if abs(trend) > 0.3:
-                    t_sym = '⬆' if trend > 0 else '⬇'
-                    t_color = G if trend > 0 else R
-                    t_text = f"T:{trend:+.1f}{t_sym}"
-                    col_trend = f"{t_color}{t_text:<7s}{X}"
-                else:
-                    col_trend = f"{D}{'T: 0.0':<7s}{X}"
-                if sr_raw != 0:
-                    sr_text = f"SR:{sr_raw:+.1f}→{sr_adj:+.1f}"
-                    sr_color = G if sr_raw > 0 else R
-                    col_sr = f"{sr_color}{sr_text:<13s}{X}"
-                else:
-                    col_sr = f"{D}{'SR: 0.0':<13s}{X}"
-
-                # MACD column
-                macd_h = current_signal.get('macd_hist', 0)
-                macd_d = current_signal.get('macd_hist_delta', 0)
-                if macd_h > 0:
-                    m_arrow = '▲' if macd_d > 0 else '▼' if macd_d < 0 else '─'
-                    col_macd = f"{G}{macd_h:>+5.1f}{m_arrow}{X}"
-                elif macd_h < 0:
-                    m_arrow = '▼' if macd_d < 0 else '▲' if macd_d > 0 else '─'
-                    col_macd = f"{R}{macd_h:>+5.1f}{m_arrow}{X}"
-                else:
-                    col_macd = f"{D}  0.0─{X}"
-
-                # VWAP column
-                v_pos = current_signal.get('vwap_pos', 0)
-                if v_pos > 0.02:
-                    col_vwap = f"{G}{v_pos:>+5.2f}↑{X}"
-                elif v_pos < -0.02:
-                    col_vwap = f"{R}{v_pos:>+5.2f}↓{X}"
-                else:
-                    col_vwap = f"{D} 0.00─{X}"
-
-                # Bollinger position column
-                bb_p = current_signal.get('bb_pos', 0.5)
-                bb_sq = current_signal.get('bb_squeeze', False)
-                bb_pct = f"{int(bb_p * 100):>3d}%"
-                if bb_p > 0.80:
-                    col_bb = f"{G}{'SQ' if bb_sq else 'HI'}{bb_pct}{X}"
-                elif bb_p < 0.20:
-                    col_bb = f"{R}{'SQ' if bb_sq else 'LO'}{bb_pct}{X}"
-                else:
-                    col_bb = f"{D}{'SQ' if bb_sq else 'MD'}{bb_pct}{X}"
-
-                pos_str = ""
-                if positions:
-                    total_shares = sum(p['shares'] for p in positions)
-                    dirs = set(p['direction'] for p in positions)
-                    d_str = '/'.join(d.upper() for d in dirs)
-                    pos_str = f" {M}{B}[{d_str} {total_shares:.0f}sh]{X}"
-
-                # Regime tag
-                if current_regime == 'TREND_UP':
-                    col_regime = f"{G}T▲{X}"
-                elif current_regime == 'TREND_DOWN':
-                    col_regime = f"{R}T▼{X}"
-                elif current_regime == 'CHOP':
-                    col_regime = f"{Y}CH{X}"
-                else:
-                    col_regime = f"{D}RG{X}"
-
-                line = f"   {col_time} │ {col_btc} │ {col_up} {col_dn} │ {col_rsi} │ {col_signal} {col_bar} │ {col_vol} │ {col_trend} │ {col_macd} │ {col_vwap} │ {col_bb} │ {col_sr} │ {col_regime}{pos_str}"
-                print(line)
+                print(format_scrolling_line(now_str, btc_price, up_buy, down_buy,
+                                            current_signal, positions, current_regime,
+                                            asset_name=config.display_name))
 
                 # --- OPPORTUNITY DETECTED ---
                 # Use phase-dependent threshold (CLOSING phase = 999, blocks all)
@@ -1074,14 +1283,10 @@ def main():
 
                     if key == 's':
                         trade_dir = 'up' if s_dir == 'UP' else 'down'
-                        info = execute_hotkey(client, trade_dir, trade_amount, token_up, token_down)
+                        info, balance, last_action = handle_buy(
+                            client, trade_dir, trade_amount, token_up, token_down,
+                            positions, balance, logger, session_pnl, reason="signal")
                         if info:
-                            d_color = G if trade_dir == 'up' else R
-                            last_action = f"{d_color}{B}BUY {trade_dir.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}signal{X}"
-                            positions.append(info)
-                            balance -= info['price'] * info['shares']
-                            logger.log_trade("BUY", trade_dir, info['shares'], info['price'],
-                                             info['shares'] * info['price'], "signal", 0, session_pnl)
                             real_entry = info['price']
                             tp = min(real_entry + (sug['tp'] - sug['entry']), 0.95)
                             sl = max(real_entry - (sug['entry'] - sug['sl']), 0.03)
@@ -1122,16 +1327,9 @@ def main():
                         last_beep = time.time()
                     elif key in ('u', 'd'):
                         manual_dir = 'up' if key == 'u' else 'down'
-                        info = execute_hotkey(client, manual_dir, trade_amount, token_up, token_down)
-                        if info:
-                            d_color = G if manual_dir == 'up' else R
-                            last_action = f"{d_color}{B}BUY {manual_dir.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
-                            positions.append(info)
-                            balance -= info['price'] * info['shares']
-                            logger.log_trade("BUY", manual_dir, info['shares'], info['price'],
-                                             info['shares'] * info['price'], "manual", 0, session_pnl)
-                        else:
-                            last_action = f"{R}✗ BUY {manual_dir.upper()} FAILED{X}"
+                        info, balance, last_action = handle_buy(
+                            client, manual_dir, trade_amount, token_up, token_down,
+                            positions, balance, logger, session_pnl, reason="manual")
                     else:
                         print(f"   {D}Ignored.{X}")
                         print()
@@ -1156,26 +1354,11 @@ def main():
                 # --- CHECK HOTKEYS DURING SLEEP ---
                 cycle_time = 0.5 if data_source == 'ws' else 2
                 key = sleep_with_key(cycle_time)
-                if key == 'u':
-                    info = execute_hotkey(client, 'up', trade_amount, token_up, token_down)
-                    if info:
-                        positions.append(info)
-                        balance -= info['price'] * info['shares']
-                        logger.log_trade("BUY", "up", info['shares'], info['price'],
-                                         info['shares'] * info['price'], "manual", 0, session_pnl)
-                        last_action = f"{G}{B}BUY UP{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
-                    else:
-                        last_action = f"{R}✗ BUY UP FAILED{X}"
-                elif key == 'd':
-                    info = execute_hotkey(client, 'down', trade_amount, token_up, token_down)
-                    if info:
-                        positions.append(info)
-                        balance -= info['price'] * info['shares']
-                        logger.log_trade("BUY", "down", info['shares'], info['price'],
-                                         info['shares'] * info['price'], "manual", 0, session_pnl)
-                        last_action = f"{R}{B}BUY DOWN{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}manual{X}"
-                    else:
-                        last_action = f"{R}✗ BUY DOWN FAILED{X}"
+                if key in ('u', 'd'):
+                    buy_dir = 'up' if key == 'u' else 'down'
+                    _, balance, last_action = handle_buy(
+                        client, buy_dir, trade_amount, token_up, token_down,
+                        positions, balance, logger, session_pnl, reason="manual")
                 elif key == 'c':
                     # Show closing status in static panel
                     status_msg = f"{Y}{B}EMERGENCY CLOSE...{X}"
@@ -1188,20 +1371,16 @@ def main():
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action)
+                               last_action=last_action, asset_name=config.display_name,
+                               poly_latency_ms=poly_latency_ms)
                     msg = execute_close_market(client, token_up, token_down)
                     if positions:
-                        for p in positions:
-                            token_id = token_up if p['direction'] == 'up' else token_down
-                            current_price = get_price(token_id, "SELL")
-                            pnl = (current_price - p['price']) * p['shares']
-                            session_pnl += pnl
-                            trade_count += 1
-                            trade_history.append(pnl)
-                            logger.log_trade("CLOSE", p['direction'], p['shares'], current_price,
-                                             p['shares'] * current_price, "emergency", pnl, session_pnl)
-                            balance += current_price * p['shares']
-                        positions.clear()
+                        total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
+                            positions, token_up, token_down, logger, "emergency",
+                            session_pnl, trade_history)
+                        trade_count += cnt
+                        for d, sh, ep, xp, pnl in pnl_list:
+                            balance += xp * sh
                     # Show result in static panel
                     pnl_color = G if session_pnl >= 0 else R
                     status_msg = f"{G}✓ Closed{X} │ {pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}"
@@ -1214,7 +1393,8 @@ def main():
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action)
+                               last_action=last_action, asset_name=config.display_name,
+                               poly_latency_ms=poly_latency_ms)
                     status_clear_at = time.time() + 5
                 elif key == 'q':
                     raise KeyboardInterrupt
@@ -1228,58 +1408,14 @@ def main():
                     print(f"{Y}Closing positions before exit...{X}")
                     msg = execute_close_market(client, token_up, token_down)
                     print(f"   {msg}")
-                    for p in positions:
-                        token_id = token_up if p['direction'] == 'up' else token_down
-                        current_price = get_price(token_id, "SELL")
-                        pnl = (current_price - p['price']) * p['shares']
-                        session_pnl += pnl
-                        trade_count += 1
-                        trade_history.append(pnl)
-                        logger.log_trade("CLOSE", p['direction'], p['shares'], current_price,
-                                         p['shares'] * current_price, "exit", pnl, session_pnl)
-                    positions.clear()
+                    total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
+                        positions, token_up, token_down, logger, "exit",
+                        session_pnl, trade_history)
+                    trade_count += cnt
 
                 # Session summary
                 duration_min = (time.time() - session_start) / 60
-                wins = sum(1 for t in trade_history if t > 0)
-                losses = sum(1 for t in trade_history if t <= 0)
-                win_rate = (wins / len(trade_history) * 100) if trade_history else 0
-                best = max(trade_history) if trade_history else 0
-                worst = min(trade_history) if trade_history else 0
-                gross_wins = sum(t for t in trade_history if t > 0)
-                gross_losses = abs(sum(t for t in trade_history if t < 0))
-                profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else gross_wins
-                # Max drawdown
-                max_dd = 0.0
-                peak = 0.0
-                cumul = 0.0
-                for t in trade_history:
-                    cumul += t
-                    if cumul > peak:
-                        peak = cumul
-                    dd = peak - cumul
-                    if dd > max_dd:
-                        max_dd = dd
-
-                print()
-                print(f" {C}{B}{'═' * 45}{X}")
-                print(f" {C}{B} SESSION SUMMARY{X}")
-                print(f" {D}{'─' * 45}{X}")
-                print(f"  Duration:       {duration_min:.0f} min")
-                print(f"  Total Trades:   {trade_count}")
-                if trade_history:
-                    wr_color = G if win_rate >= 50 else R
-                    print(f"  Win Rate:       {wr_color}{win_rate:.0f}%{X} ({G}{wins}W{X} / {R}{losses}L{X})")
-                    pnl_c = G if session_pnl >= 0 else R
-                    print(f"  Total P&L:      {pnl_c}{'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X}")
-                    print(f"  Best Trade:     {G}+${best:.2f}{X}")
-                    print(f"  Worst Trade:    {R}${worst:.2f}{X}")
-                    print(f"  Profit Factor:  {W}{profit_factor:.2f}{X}")
-                    print(f"  Max Drawdown:   {R}-${max_dd:.2f}{X}")
-                else:
-                    print(f"  {D}No trades this session{X}")
-                print(f" {C}{B}{'═' * 45}{X}")
-                print()
+                stats = print_session_summary(duration_min, trade_count, session_pnl, trade_history)
 
                 # Log session to CSV
                 logger.log_session_summary({
@@ -1288,12 +1424,12 @@ def main():
                     "end_time": datetime.now().strftime("%H:%M:%S"),
                     "duration_min": duration_min,
                     "total_trades": trade_count,
-                    "wins": wins, "losses": losses,
-                    "win_rate": win_rate,
+                    "wins": stats['wins'], "losses": stats['losses'],
+                    "win_rate": stats['win_rate'],
                     "total_pnl": session_pnl,
-                    "best_trade": best, "worst_trade": worst,
-                    "profit_factor": profit_factor,
-                    "max_drawdown": max_dd,
+                    "best_trade": stats['best'], "worst_trade": stats['worst'],
+                    "profit_factor": stats['profit_factor'],
+                    "max_drawdown": stats['max_drawdown'],
                 })
 
                 print(f"{Y}Radar terminated{X}")
@@ -1305,6 +1441,8 @@ def main():
     finally:
         # Stop WebSocket
         binance_ws.stop()
+        # Shutdown thread pool
+        _executor.shutdown(wait=False)
         # Restore terminal
         sys.stdout.write("\033[r")  # reset scroll region
         sys.stdout.flush()

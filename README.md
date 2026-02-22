@@ -1,10 +1,10 @@
-# Polymarket BTC Scalping Radar
+# Polymarket Crypto Scalping Radar
 
-Real-time scalping radar for Polymarket BTC 15-minute Up/Down markets, powered by Binance price data via WebSocket and a 6-component signal engine with market regime detection.
+Real-time scalping radar for Polymarket crypto Up/Down markets (BTC, ETH, SOL, XRP — 5m/15m windows), powered by Binance price data via WebSocket and a 6-component signal engine with market regime detection.
 
 ## Overview
 
-This tool monitors BTC price on Binance (WebSocket + HTTP fallback) and cross-references it with Polymarket's BTC 15-minute prediction markets. It generates trade signals based on 6 weighted components — momentum, divergence, support/resistance, MACD, VWAP, and Bollinger Bands — displayed in a split-screen terminal UI with manual hotkey trading.
+This tool monitors crypto prices on Binance (WebSocket + HTTP fallback) and cross-references them with Polymarket's prediction markets. It generates trade signals based on 6 weighted components — momentum, divergence, support/resistance, MACD, VWAP, and Bollinger Bands — displayed in a split-screen terminal UI with manual hotkey trading.
 
 ## Features
 
@@ -17,22 +17,24 @@ This tool monitors BTC price on Binance (WebSocket + HTTP fallback) and cross-re
 - **Manual hotkey trading** — Press U/D/C/S/Q to buy UP, buy DOWN, close all, accept a signal, or exit
 - **TP/SL monitoring** — Visual progress bar tracking take-profit and stop-loss levels
 - **Price alerts** — Audio beep when prices cross configurable thresholds (edge-triggered)
-- **Market auto-discovery** — Automatically finds the active BTC 15-minute market window
+- **Multi-market support** — BTC, ETH, SOL, XRP with 5-minute or 15-minute windows
+- **Market auto-discovery** — Automatically finds the active market window
 - **CSV logging** — Signals, trades, and session summaries logged to `logs/` for analysis
 - **Session stats** — Win rate, P&L, profit factor, and max drawdown displayed on exit
-- **Fully configurable** — 27 parameters via `.env` (indicators, weights, thresholds, regime)
+- **Fully configurable** — 29 parameters via `.env` (market, indicators, weights, thresholds, regime)
 
 ## Project Structure
 
 ```
 polymarket/
 ├── radar_poly.py        Main radar script (UI, signals, trading)
+├── market_config.py      Market configuration (asset, window, derived values)
 ├── binance_api.py        Binance API (price, candles, RSI, MACD, VWAP, BB, ADX, regime)
 ├── ws_binance.py         Binance WebSocket client (real-time klines, auto-reconnect)
 ├── polymarket_api.py     Polymarket CLOB API (auth, orders, positions)
 ├── logger.py             CSV logging (signals, trades, session summaries)
 ├── .env                  Configuration - YOU CREATE THIS (see below)
-├── .env.example          Example config template (27 parameters)
+├── .env.example          Example config template (29 parameters)
 ├── requirements.txt      Python dependencies
 ├── setup.sh              Setup script for Linux / macOS
 ├── setup.bat             Setup script for Windows
@@ -129,6 +131,22 @@ Open `.env` in any text editor and replace `0xYOUR_PRIVATE_KEY_HERE` with the pr
 
 ### Available settings
 
+#### Market Selection
+
+| Variable | Description | Default |
+|---|---|---|
+| `MARKET_ASSET` | Crypto asset to trade (`btc`, `eth`, `sol`, `xrp`) | btc |
+| `MARKET_WINDOW` | Market window duration in minutes (`5` or `15`) | 15 |
+
+**Available markets:**
+
+| Asset | 5-minute | 15-minute |
+|-------|----------|-----------|
+| BTC | `btc-updown-5m` | `btc-updown-15m` |
+| ETH | `eth-updown-5m` | `eth-updown-15m` |
+| SOL | `sol-updown-5m` | `sol-updown-15m` |
+| XRP | `xrp-updown-5m` | `xrp-updown-15m` |
+
 #### Credentials & Trading
 
 | Variable | Description | Default |
@@ -176,9 +194,9 @@ Open `.env` in any text editor and replace `0xYOUR_PRIVATE_KEY_HERE` with the pr
 
 | Variable | Phase | Default |
 |---|---|---|
-| `PHASE_EARLY_THRESHOLD` | EARLY (>10 min left): conservative | 50 |
-| `PHASE_MID_THRESHOLD` | MID (5-10 min left): normal | 30 |
-| `PHASE_LATE_THRESHOLD` | LATE (1-5 min left): very selective | 70 |
+| `PHASE_EARLY_THRESHOLD` | EARLY (>66% time left): conservative | 50 |
+| `PHASE_MID_THRESHOLD` | MID (33-66% time left): normal | 30 |
+| `PHASE_LATE_THRESHOLD` | LATE (6-33% time left): very selective | 70 |
 
 ## Usage
 
@@ -330,14 +348,17 @@ All multipliers are configurable: `REGIME_CHOP_MULT`, `REGIME_TREND_BOOST`, `REG
 
 ### Phase Thresholds
 
-Signal strength threshold varies by time remaining in the 15-minute window:
+Signal strength threshold varies by time remaining, proportional to the market window size:
 
 | Phase | Time Remaining | Min Strength | Behavior |
 |-------|---------------|-------------|----------|
-| **EARLY** | > 10 min | 50% | Conservative, only strong signals |
-| **MID** | 5-10 min | 30% | Normal operation |
-| **LATE** | 1-5 min | 70% | Very selective, only very strong signals |
-| **CLOSING** | < 1 min | Blocked | No new trades allowed |
+| **EARLY** | > 66% of window | 50% | Conservative, only strong signals |
+| **MID** | 33-66% of window | 30% | Normal operation |
+| **LATE** | 6-33% of window | 70% | Very selective, only very strong signals |
+| **CLOSING** | < 6% of window | Blocked | No new trades allowed |
+
+For a 15m window: EARLY >10min, MID 5-10min, LATE 1-5min, CLOSING <1min.
+For a 5m window: EARLY >3.3min, MID 1.7-3.3min, LATE 0.3-1.7min, CLOSING <18s.
 
 Thresholds are configurable: `PHASE_EARLY_THRESHOLD`, `PHASE_MID_THRESHOLD`, `PHASE_LATE_THRESHOLD`.
 
@@ -366,10 +387,11 @@ Binance candles (WS/HTTP)
 
 ## Data Sources
 
-### Binance (BTC/USDT)
+### Binance
 
-- **Primary**: WebSocket `wss://stream.binance.com:9443/ws/btcusdt@kline_1m` (real-time, ~0ms latency)
+- **Primary**: WebSocket `wss://stream.binance.com:9443/ws/{asset}usdt@kline_1m` (real-time, ~0ms latency)
 - **Fallback**: REST API `https://api.binance.com/api/v3/klines` (~300ms per call)
+- Supports all configured assets: BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT
 - WebSocket provides 1-minute klines with auto-reconnect and exponential backoff
 - Candle buffer maintained in memory (30 completed + 1 forming)
 - Data source shown in dashboard: `WS` (green) or `HTTP` (gray)
@@ -427,10 +449,16 @@ Main radar script with split-screen terminal UI. Cross-platform (Linux/macOS/Win
 - Price alerts (edge-triggered audio beeps)
 - Session P&L tracking (wins, losses, profit factor, drawdown)
 
+### `market_config.py`
+Market configuration module:
+- `MarketConfig` — Reads `MARKET_ASSET` and `MARKET_WINDOW` from `.env`
+- Derives: slug prefix, Binance symbol, WebSocket symbol, window seconds, display name
+- Validates supported assets (btc, eth, sol, xrp) and windows (5, 15)
+
 ### `binance_api.py`
-Binance public API wrapper (no authentication needed):
-- `get_btc_price()` — Current BTC/USDT price
-- `get_klines()` — Historical candles (1m default)
+Binance public API wrapper (no authentication needed). All functions accept a `symbol` parameter (default: BTCUSDT):
+- `get_btc_price(symbol)` — Current price for any trading pair
+- `get_klines(symbol)` — Historical candles (1m default)
 - `compute_rsi()` — RSI (configurable period, default 7)
 - `compute_atr()` — Average True Range (volatility)
 - `compute_adx()` — Average Directional Index (trend strength, Wilder's smoothing)
@@ -439,11 +467,12 @@ Binance public API wrapper (no authentication needed):
 - `compute_bollinger()` — Upper/middle/lower bands, bandwidth, position, squeeze detection
 - `compute_bollinger_bandwidth()` — Simplified bandwidth + position
 - `detect_regime()` — Market regime classification (TREND_UP/DOWN, RANGE, CHOP)
-- `get_full_analysis()` — Combined analysis with all indicators (accepts WS candles)
+- `get_full_analysis(candles, symbol)` — Combined analysis with all indicators (accepts WS candles)
 - `analyze_trend()` — Score-based candle trend analysis
 
 ### `ws_binance.py`
-Binance WebSocket client for real-time BTC/USDT kline data:
+Binance WebSocket client for real-time kline data (configurable symbol):
+- `BinanceWS(symbol, interval)` — Dynamic endpoint based on trading pair
 - Auto-reconnect with exponential backoff (2s → 30s max)
 - Dual endpoint failover (`stream.binance.com:9443` and `:443`)
 - Thread-safe candle buffer (completed + live forming candle)
@@ -454,7 +483,7 @@ Binance WebSocket client for real-time BTC/USDT kline data:
 ### `polymarket_api.py`
 Polymarket CLOB API wrapper:
 - `create_client()` — Authenticated ClobClient with proxy wallet
-- `find_current_market()` — Auto-discovers active BTC 15m market
+- `find_current_market(config)` — Auto-discovers active market for configured asset/window
 - `get_balance()` — USDC balance (net of open orders)
 - `get_token_position()` — Conditional token balance
 - `check_limit()` — Position limit verification
@@ -470,7 +499,7 @@ CSV logging module:
 ### Setup & config
 - `setup.sh` — Automated setup for Linux/macOS (bash)
 - `setup.bat` — Automated setup for Windows (cmd)
-- `.env.example` — Template configuration file with 27 parameters
+- `.env.example` — Template configuration file with 29 parameters
 - `requirements.txt` — Python package dependencies
 
 ## Technical Details
@@ -483,7 +512,7 @@ CSV logging module:
 - **WebSocket**: `websocket-client` library with `run_forever()`, 30s ping interval
 - **Parallel I/O**: `ThreadPoolExecutor` for concurrent Polymarket price fetches
 - **Price history**: `deque(maxlen=60)` — ~2 minutes of data at 2s polling interval
-- **Market discovery**: Timestamp-based slug matching (`btc-updown-15m-{timestamp}`)
+- **Market discovery**: Timestamp-based slug matching (`{asset}-updown-{window}m-{timestamp}`)
 - **Proxy wallet**: CREATE2 address derivation from Polymarket factory contract
 - **Regime detection**: ADX (Wilder's smoothing) + Bollinger bandwidth + SMA direction
 - **Log rotation**: Daily CSV files with automatic header creation
