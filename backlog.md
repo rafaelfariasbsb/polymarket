@@ -19,7 +19,7 @@ Documento gerado a partir da análise de 3 especialistas (Arquitetura, Trading, 
 | 5 | Session Win Rate & Performance Stats | ✅ Completa |
 | 6 | WebSocket Real-Time Data | ✅ Completa |
 | 7 | Melhorias Menores | ⬜ Parcial |
-| 8 | Multi-Market Support | ⬜ Planejada |
+| 8 | Multi-Market Support | ✅ Completa |
 
 ---
 
@@ -106,12 +106,13 @@ Documento gerado a partir da análise de 3 especialistas (Arquitetura, Trading, 
 - **Esforço**: Baixo
 - **Arquivos**: `radar_poly.py` — `monitor_tp_sl()`
 
-#### 10. Multi-Market Support (Fase 8)
-- **Problema**: Todo o sistema está hardcoded para `btc-updown-15m`. São 30+ referências em 4 arquivos.
-- **Solução**: Novo `market_config.py` com classe `MarketConfig` que centraliza configuração derivada de `MARKET_ASSET` e `MARKET_WINDOW` (.env). Detalhes completos no plano original (Fase 8).
-- **Impacto**: Alto — permite operar ETH, SOL, mercados de 5min
+#### 10. Multi-Market Support (Fase 8) ✅
+- **Problema**: Todo o sistema estava hardcoded para `btc-updown-15m`. 30+ referências em 4 arquivos.
+- **Solução**: Novo `market_config.py` com classe `MarketConfig` que centraliza configuração derivada de `MARKET_ASSET` e `MARKET_WINDOW` (.env).
+- **Impacto**: Alto — permite operar BTC, ETH, SOL, XRP em janelas de 5min e 15min
 - **Esforço**: Alto
 - **Arquivos**: `market_config.py` (novo), `polymarket_api.py`, `binance_api.py`, `ws_binance.py`, `radar_poly.py`, `.env.example`
+- **Status**: ✅ Implementado — MarketConfig, find_current_market(config), symbol param em todas funções Binance, WS dinâmico, display parametrizado, phases proporcionais
 
 ---
 
@@ -352,13 +353,13 @@ Resultado: `main()` cai de **597 → ~370 linhas** e de **44 → ~30 variáveis*
 7. requests.Session() persistente (#6)
 8. ThreadPoolExecutor persistente (#7)
 
-### Sprint 3 — Refatoração
-9. Extrair handle_buy/handle_close (#8)
-10. Extrair format_scrolling_line (#12)
+### Sprint 3 — Refatoração (parcial ✅)
+9. Extrair handle_buy/handle_close (#8) ✅
+10. Extrair format_scrolling_line (#12) ✅
 11. PanelState dataclass (#11)
 
-### Sprint 4 — Multi-Market (Fase 8)
-12. MarketConfig + parametrização (#10)
+### Sprint 4 — Multi-Market (Fase 8) ✅
+12. MarketConfig + parametrização (#10) ✅
 
 ### Sprint 5 — Polish
 13. History gap protection (#13)
