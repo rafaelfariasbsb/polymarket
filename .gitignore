@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Logs
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup
+backup/
