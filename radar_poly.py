@@ -64,6 +64,7 @@ if sys.prefix == sys.base_prefix:
 sys.stdout.reconfigure(line_buffering=True)
 
 sys.path.insert(0, os.path.dirname(__file__))
+from market_config import MarketConfig
 from binance_api import get_full_analysis, get_price_at_timestamp
 from polymarket_api import (
     create_client, find_current_market, get_token_position,
@@ -169,17 +170,19 @@ def _ema(values, period):
     return ema
 
 
-def get_market_phase(time_remaining):
-    """Determine market phase based on time remaining in 15-min window.
+def get_market_phase(time_remaining, window_min=15):
+    """Determine market phase based on time remaining.
+    Thresholds are proportional to window size.
     Returns (phase_name, min_strength_threshold)."""
-    if time_remaining > 10:
+    pct = time_remaining / window_min if window_min > 0 else 0
+    if pct > 0.66:
         return 'EARLY', PHASE_EARLY_THRESHOLD
-    elif time_remaining > 5:
+    elif pct > 0.33:
         return 'MID', PHASE_MID_THRESHOLD
-    elif time_remaining > 1:
+    elif pct > 0.06:
         return 'LATE', PHASE_LATE_THRESHOLD
     else:
-        return 'CLOSING', 999  # last minute: NO trading
+        return 'CLOSING', 999  # last ~6%: NO trading
 
 
 def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='MID'):
@@ -413,7 +416,7 @@ def sleep_with_key(seconds):
 
 # --- Scrolling log formatter -----------------------------------------------------
 
-def format_scrolling_line(now_str, btc_price, up_buy, down_buy, signal, positions, regime):
+def format_scrolling_line(now_str, btc_price, up_buy, down_buy, signal, positions, regime, asset_name="BTC"):
     """Format one line for the scrolling log area. Returns formatted string."""
     s_dir = signal['direction']
     strength = signal['strength']
@@ -430,7 +433,7 @@ def format_scrolling_line(now_str, btc_price, up_buy, down_buy, signal, position
     rsi_arrow = '↑' if rsi_val < 45 else '↓' if rsi_val > 55 else '─'
 
     col_time   = f"{D}{now_str}{X}"
-    col_btc    = f"BTC:{W}${btc_price:>7,.0f}{X}"
+    col_btc    = f"{asset_name}:{W}${btc_price:>7,.0f}{X}"
     col_up     = f"UP:{G}${up_buy:.2f}{X}"
     col_dn     = f"DN:{R}${down_buy:.2f}{X}"
     rsi_c = G if rsi_val < 40 else R if rsi_val > 60 else D
@@ -579,7 +582,7 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
                trade_amount, alert_active=False, alert_side="", alert_price=0.0,
                session_pnl=0.0, trade_count=0, regime="", phase="",
                data_source="http", status_msg="", price_to_beat=0.0, ws_status="",
-               trade_history=None, last_action=""):
+               trade_history=None, last_action="", asset_name="BTC"):
     """Redraws the static panel at the top (HEADER_LINES lines).
     Uses StringIO buffer for single write+flush (reduces terminal I/O)."""
     w = shutil.get_terminal_size().columns
@@ -616,7 +619,7 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         src_str = f"{D}HTTP{X} {Y}{ws_status}{X}"
     else:
         src_str = f"{D}HTTP{X}"
-    buf.write(f"\033[4;1H\033[K {C}BINANCE {X}│ BTC: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str} │ {src_str}")
+    buf.write(f"\033[4;1H\033[K {C}BINANCE {X}│ {asset_name}: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str} │ {src_str}")
 
     # Line 5: Market
     time_color = R if time_remaining < 2 else Y if time_remaining < 5 else G
@@ -726,7 +729,8 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
     buf.write(f"\033[13;1H\033[K {C}{B}{'═' * (w - 2)}{X}")
 
     # Line 14: column headers
-    buf.write(f"\033[14;1H\033[K   {D}{'TIME':8s} │ {'BTC':>12s} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>7s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>6s} │ {'S/R':>13s} │ {'REGIME':6s}{X}")
+    col_asset = f"{asset_name:>12s}"
+    buf.write(f"\033[14;1H\033[K   {D}{'TIME':8s} │ {col_asset} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>7s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>6s} │ {'S/R':>13s} │ {'REGIME':6s}{X}")
 
     # Line 15: blank
     buf.write(f"\033[15;1H\033[K")
@@ -969,6 +973,13 @@ def main():
         except ValueError:
             pass
 
+    # -- Market config --
+    try:
+        config = MarketConfig()
+    except ValueError as e:
+        print(f"\033[91m{e}\033[0m")
+        return
+
     # -- Logger --
     logger = RadarLogger()
     session_start = time.time()
@@ -998,7 +1009,7 @@ def main():
     print()
 
     # -- Connection (before clearing screen) --
-    print(f"\n{C}{B}RADAR POLYMARKET - Connecting...{X}")
+    print(f"\n{C}{B}RADAR POLYMARKET - {config.display_name} {config.window_min}m - Connecting...{X}")
 
     print(f"   Connecting to Polymarket...", end="", flush=True)
     try:
@@ -1009,27 +1020,27 @@ def main():
         print(f" {R}✗{X} {e}")
         return
 
-    print(f"   Finding market...", end="", flush=True)
+    print(f"   Finding {config.display_name} {config.window_min}m market...", end="", flush=True)
     try:
-        event, market, token_up, token_down, time_remaining = find_current_market()
+        event, market, token_up, token_down, time_remaining = find_current_market(config)
         market_slug = event.get("slug", "")
         print(f" {G}✓{X} {market_slug}")
     except Exception as e:
         print(f" {R}✗{X} {e}")
         return
 
-    # Get Price to Beat (BTC price at window start)
+    # Get Price to Beat (asset price at window start)
     price_to_beat = 0.0
     try:
         window_ts = int(market_slug.split('-')[-1])
-        price_to_beat = get_price_at_timestamp(window_ts)
+        price_to_beat = get_price_at_timestamp(window_ts, symbol=config.binance_symbol)
         if price_to_beat > 0:
             print(f"   Price to Beat: {G}${price_to_beat:,.2f}{X}")
     except Exception:
         pass
 
     # Start Binance WebSocket
-    binance_ws = BinanceWS()
+    binance_ws = BinanceWS(symbol=config.ws_symbol)
     print(f"   Connecting to Binance WS...", end="", flush=True)
     ws_started = binance_ws.start()
     if ws_started:
@@ -1088,7 +1099,7 @@ def main():
                    market_slug, time_remaining, 0, 0, positions, None, trade_amount,
                    session_pnl=session_pnl, trade_count=trade_count,
                    price_to_beat=price_to_beat, trade_history=trade_history,
-                   last_action=last_action)
+                   last_action=last_action, asset_name=config.display_name)
 
         print(f"   {D}Collecting initial data...{X}")
 
@@ -1103,7 +1114,7 @@ def main():
                 # Refresh market every 60s
                 if now - last_market_check > 60:
                     try:
-                        event, market, new_token_up, new_token_down, time_remaining = find_current_market()
+                        event, market, new_token_up, new_token_down, time_remaining = find_current_market(config)
                         new_slug = event.get("slug", "")
                         # Detect market transition (new 15-min window)
                         if new_slug != market_slug:
@@ -1120,7 +1131,7 @@ def main():
                             # Fetch new Price to Beat
                             try:
                                 window_ts = int(new_slug.split('-')[-1])
-                                price_to_beat = get_price_at_timestamp(window_ts)
+                                price_to_beat = get_price_at_timestamp(window_ts, symbol=config.binance_symbol)
                             except Exception:
                                 price_to_beat = 0.0
                             status_msg = f"{Y}MARKET SWITCHED → {new_slug}{X}"
@@ -1145,9 +1156,9 @@ def main():
                 try:
                     ws_candles, data_source = binance_ws.get_candles(limit=20)
                     if ws_candles and len(ws_candles) >= 5:
-                        bin_direction, confidence, details = get_full_analysis(candles=ws_candles)
+                        bin_direction, confidence, details = get_full_analysis(candles=ws_candles, symbol=config.binance_symbol)
                     else:
-                        bin_direction, confidence, details = get_full_analysis()
+                        bin_direction, confidence, details = get_full_analysis(symbol=config.binance_symbol)
                         data_source = 'http'
                     btc_price = details.get('btc_price', 0)
                     binance_data = {
@@ -1170,7 +1181,7 @@ def main():
                                session_pnl=session_pnl, trade_count=trade_count,
                                status_msg=f"{Y}Binance error — retrying...{X}",
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action)
+                               last_action=last_action, asset_name=config.display_name)
                     sleep_with_key(2)
                     continue
 
@@ -1189,12 +1200,12 @@ def main():
                                status_msg=f"{Y}Token prices unavailable — retrying...{X}",
                                ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action)
+                               last_action=last_action, asset_name=config.display_name)
                     sleep_with_key(2)
                     continue
 
                 # Market phase
-                current_phase, phase_threshold = get_market_phase(current_time)
+                current_phase, phase_threshold = get_market_phase(current_time, config.window_min)
 
                 # Compute signal v2 (regime + phase aware)
                 current_signal = compute_signal(up_buy, down_buy, btc_price, binance_data,
@@ -1218,7 +1229,7 @@ def main():
                            regime=current_regime, phase=current_phase,
                            data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                            price_to_beat=price_to_beat, trade_history=trade_history,
-                           last_action=last_action)
+                           last_action=last_action, asset_name=config.display_name)
 
                 # -- SCROLLING LOG --
                 s_dir = current_signal['direction']
@@ -1232,7 +1243,8 @@ def main():
                 else: color, sym = D, '─'
 
                 print(format_scrolling_line(now_str, btc_price, up_buy, down_buy,
-                                            current_signal, positions, current_regime))
+                                            current_signal, positions, current_regime,
+                                            asset_name=config.display_name))
 
                 # --- OPPORTUNITY DETECTED ---
                 # Use phase-dependent threshold (CLOSING phase = 999, blocks all)
@@ -1342,7 +1354,7 @@ def main():
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action)
+                               last_action=last_action, asset_name=config.display_name)
                     msg = execute_close_market(client, token_up, token_down)
                     if positions:
                         total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
@@ -1363,7 +1375,7 @@ def main():
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action)
+                               last_action=last_action, asset_name=config.display_name)
                     status_clear_at = time.time() + 5
                 elif key == 'q':
                     raise KeyboardInterrupt

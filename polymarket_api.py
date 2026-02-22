@@ -135,35 +135,38 @@ def coerce_list(maybe_list):
     return []
 
 
-def find_current_market():
+def find_current_market(config=None):
     """
-    Finds the active BTC 15m market.
+    Finds the active updown market for the configured asset and window.
+    Args:
+        config: MarketConfig instance (if None, uses default btc/15m)
     Returns (event, market, token_up, token_down, time_to_close_min)
     """
+    if config is None:
+        from market_config import MarketConfig
+        config = MarketConfig()
+
+    window_min = config.window_min
+    window_sec = config.window_seconds
+    slug_prefix = config.slug_prefix
+
     now_local = datetime.now()
     now_brasilia = now_local.replace(tzinfo=BRASILIA)
     now_et = now_brasilia.astimezone(ET)
 
     minute = now_et.minute
-    if minute < 15:
-        window_start_minute = 0
-    elif minute < 30:
-        window_start_minute = 15
-    elif minute < 45:
-        window_start_minute = 30
-    else:
-        window_start_minute = 45
+    window_start_minute = (minute // window_min) * window_min
 
     window_start = now_et.replace(minute=window_start_minute, second=0, microsecond=0)
     window_start_utc = window_start.astimezone(UTC)
     target_timestamp = int(window_start_utc.timestamp())
-    rounded = round(target_timestamp / 900) * 900
+    rounded = round(target_timestamp / window_sec) * window_sec
 
-    possible_timestamps = [rounded, target_timestamp, rounded - 900, rounded + 900]
+    possible_timestamps = [rounded, target_timestamp, rounded - window_sec, rounded + window_sec]
 
     event = None
     for ts in possible_timestamps:
-        slug = f"btc-updown-15m-{ts}"
+        slug = f"{slug_prefix}-{ts}"
         try:
             r = _session.get(f"{GAMMA}/events", params={"slug": slug}, timeout=10)
             if r.status_code == 200 and r.json():
@@ -180,7 +183,7 @@ def find_current_market():
             continue
 
     if not event:
-        raise RuntimeError("BTC 15m market not found for current window")
+        raise RuntimeError(f"{config.display_name} {window_min}m market not found for current window")
 
     markets = event.get("markets", [])
     market = markets[0]

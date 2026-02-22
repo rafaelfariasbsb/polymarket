@@ -25,27 +25,28 @@ BB_STD = int(os.getenv('BB_STD', '2'))
 ADX_PERIOD = int(os.getenv('ADX_PERIOD', '7'))
 
 
-def get_btc_price():
-    """Returns the current BTC/USDT price from Binance."""
-    r = _session.get(f"{BINANCE_API}/ticker/price", params={"symbol": "BTCUSDT"}, timeout=10)
+def get_btc_price(symbol="BTCUSDT"):
+    """Returns the current price for a symbol from Binance."""
+    r = _session.get(f"{BINANCE_API}/ticker/price", params={"symbol": symbol}, timeout=10)
     r.raise_for_status()
     return float(r.json()["price"])
 
 
-def get_price_at_timestamp(timestamp_sec):
-    """Returns the BTC/USDT open price at a specific timestamp (Price to Beat).
+def get_price_at_timestamp(timestamp_sec, symbol="BTCUSDT"):
+    """Returns the open price at a specific timestamp (Price to Beat).
 
     Args:
         timestamp_sec: Unix timestamp in seconds (e.g. from market slug)
+        symbol: Binance trading pair (default: BTCUSDT)
 
     Returns:
-        float: BTC price at that timestamp, or 0.0 on error
+        float: price at that timestamp, or 0.0 on error
     """
     try:
         r = _session.get(
             f"{BINANCE_API}/klines",
             params={
-                "symbol": "BTCUSDT",
+                "symbol": symbol,
                 "interval": "1m",
                 "startTime": timestamp_sec * 1000,
                 "limit": 1,
@@ -61,11 +62,12 @@ def get_price_at_timestamp(timestamp_sec):
     return 0.0
 
 
-def get_klines(interval="1m", limit=15):
+def get_klines(symbol="BTCUSDT", interval="1m", limit=15):
     """
-    Returns the latest BTC/USDT candles.
+    Returns the latest candles for a symbol.
 
     Args:
+        symbol: Binance trading pair (default: BTCUSDT)
         interval: "1m", "3m", "5m", "15m", etc.
         limit: number of candles (max 1000)
 
@@ -73,7 +75,7 @@ def get_klines(interval="1m", limit=15):
     """
     r = _session.get(
         f"{BINANCE_API}/klines",
-        params={"symbol": "BTCUSDT", "interval": interval, "limit": limit},
+        params={"symbol": symbol, "interval": interval, "limit": limit},
         timeout=10,
     )
     r.raise_for_status()
@@ -411,17 +413,18 @@ def detect_regime(candles):
         return "RANGE", adx
 
 
-def get_full_analysis(candles=None):
+def get_full_analysis(candles=None, symbol="BTCUSDT"):
     """Returns full analysis with all indicators.
 
     Args:
         candles: pre-fetched candles (from WebSocket). If None, fetches via HTTP.
+        symbol: Binance trading pair (used when fetching via HTTP)
 
     Returns:
         direction, confidence, details
     """
     if candles is None:
-        candles = get_klines(interval="1m", limit=20)
+        candles = get_klines(symbol=symbol, interval="1m", limit=20)
     direction, confidence, details = analyze_trend(candles)
 
     details['rsi'] = compute_rsi(candles)
@@ -548,14 +551,17 @@ def analyze_trend(candles):
         return "neutral", abs(score), details
 
 
-def get_btc_trend():
+def get_btc_trend(symbol="BTCUSDT"):
     """
     Main function: fetches klines and returns trend analysis.
+
+    Args:
+        symbol: Binance trading pair (default: BTCUSDT)
 
     Returns:
         direction: "up", "down" or "neutral"
         confidence: float 0.0 to 1.0
         details: dict with metrics
     """
-    candles = get_klines(interval="1m", limit=10)
+    candles = get_klines(symbol=symbol, interval="1m", limit=10)
     return analyze_trend(candles)
