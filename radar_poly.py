@@ -22,6 +22,7 @@ Usage:
 
 import sys
 import os
+import io
 import time
 import platform
 import shutil
@@ -113,17 +114,48 @@ X = '\033[0m'
 
 HEADER_LINES = 15  # static panel lines
 
+# Persistent HTTP session (reuses TCP connections via keep-alive)
+_session = requests.Session()
+
+# Persistent thread pool (avoid recreating every cycle)
+_executor = ThreadPoolExecutor(max_workers=2)
+
+
+class PriceCache:
+    """TTL-based cache for get_price() to avoid duplicate HTTP calls."""
+
+    def __init__(self, ttl_sec=0.5):
+        self._cache = {}
+        self._ttl = ttl_sec
+
+    def get(self, token_id, side):
+        now = time.time()
+        key = (token_id, side)
+        if key in self._cache:
+            price, ts = self._cache[key]
+            if now - ts < self._ttl:
+                return price
+        try:
+            resp = _session.get(
+                f"{CLOB}/price",
+                params={"token_id": token_id, "side": side},
+                timeout=5,
+            )
+            price = float(resp.json()["price"])
+        except Exception:
+            price = 0.0
+        self._cache[key] = (price, now)
+        return price
+
+    def invalidate(self):
+        self._cache.clear()
+
+
+_price_cache = PriceCache(ttl_sec=0.5)
+
 
 def get_price(token_id, side):
-    try:
-        resp = requests.get(
-            f"{CLOB}/price",
-            params={"token_id": token_id, "side": side},
-            timeout=5,
-        )
-        return float(resp.json()["price"])
-    except Exception:
-        return 0.0
+    return _price_cache.get(token_id, side)
 
 
 def _ema(values, period):
@@ -162,12 +194,11 @@ def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='
     score = 0.0
     rsi = binance.get('rsi', 50)
     bin_score = binance.get('score', 0)
-    hist = list(history)
 
     # TREND FILTER (EMA of UP price)
     trend_strength = 0.0
-    if len(hist) >= 12:
-        up_prices = [h['up'] for h in hist[-20:] if h['up'] > 0]
+    if len(history) >= 12:
+        up_prices = [h['up'] for h in list(history)[-20:] if h['up'] > 0]
         if len(up_prices) >= 12:
             fast_ema = _ema(up_prices, 5)
             slow_ema = _ema(up_prices, 12)
@@ -189,8 +220,8 @@ def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='
     # 2. DIVERGENCE (20%) — BTC vs Polymarket
     div_score = 0.0
     btc_var = 0
-    if len(hist) >= 6:
-        h_old, h_new = hist[-6], hist[-1]
+    if len(history) >= 6:
+        h_old, h_new = history[-6], history[-1]
         if h_old['btc'] > 0 and h_old['up'] > 0:
             btc_var = (h_new['btc'] - h_old['btc']) / h_old['btc'] * 100
             poly_var = h_new['up'] - h_old['up']
@@ -203,8 +234,8 @@ def compute_signal(up_buy, down_buy, btc_price, binance, regime='RANGE', phase='
     # 3. SUPPORT/RESISTANCE (10%) + TREND FILTER
     sr_score = 0.0
     sr_raw = 0.0
-    if len(hist) >= 10:
-        ups = [h['up'] for h in hist if h['up'] > 0]
+    if len(history) >= 10:
+        ups = [h['up'] for h in history if h['up'] > 0]
         if len(ups) >= 10:
             up_min, up_max = min(ups[-20:]), max(ups[-20:])
             range_ = up_max - up_min
@@ -549,30 +580,27 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
                session_pnl=0.0, trade_count=0, regime="", phase="",
                data_source="http", status_msg="", price_to_beat=0.0, ws_status="",
                trade_history=None, last_action=""):
-    """Redraws the static panel at the top (HEADER_LINES lines)."""
+    """Redraws the static panel at the top (HEADER_LINES lines).
+    Uses StringIO buffer for single write+flush (reduces terminal I/O)."""
     w = shutil.get_terminal_size().columns
+    buf = io.StringIO()
 
-    sys.stdout.write("\033[s")  # save cursor
+    buf.write("\033[s")  # save cursor
 
     # Line 1: title bar
-    sys.stdout.write(f"\033[1;1H\033[K")
-    sys.stdout.write(f" {C}{B}{'═' * (w - 2)}{X}")
+    buf.write(f"\033[1;1H\033[K {C}{B}{'═' * (w - 2)}{X}")
 
     # Line 2: header with time and balance
-    sys.stdout.write(f"\033[2;1H\033[K")
-    sys.stdout.write(f" {C}{B}RADAR POLYMARKET{X} │ {W}{time_str}{X} │ Balance: {G}${balance:.2f}{X} │ Trade: {W}${trade_amount:.0f}{X}")
+    buf.write(f"\033[2;1H\033[K {C}{B}RADAR POLYMARKET{X} │ {W}{time_str}{X} │ Balance: {G}${balance:.2f}{X} │ Trade: {W}${trade_amount:.0f}{X}")
 
     # Line 3: separator
-    sys.stdout.write(f"\033[3;1H\033[K")
-    sys.stdout.write(f" {C}{'═' * (w - 2)}{X}")
+    buf.write(f"\033[3;1H\033[K {C}{'═' * (w - 2)}{X}")
 
     # Line 4: Binance
     bin_color = G if bin_direction == 'UP' else R if bin_direction == 'DOWN' else D
     rsi_val = binance_data.get('rsi', 50)
     score_bin = binance_data.get('score', 0)
-    vol_pct = signal.get('vol_pct', 0) if signal else 0
     vol_str = f"{Y}HIGH{X}" if (signal and signal.get('high_vol')) else f"{D}normal{X}"
-    sys.stdout.write(f"\033[4;1H\033[K")
     # Regime indicator
     if regime == 'TREND_UP':
         reg_str = f"{G}{B}TREND▲{X}"
@@ -588,12 +616,10 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         src_str = f"{D}HTTP{X} {Y}{ws_status}{X}"
     else:
         src_str = f"{D}HTTP{X}"
-    sys.stdout.write(f" {C}BINANCE {X}│ BTC: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str} │ {src_str}")
+    buf.write(f"\033[4;1H\033[K {C}BINANCE {X}│ BTC: {W}${btc_price:>8,.2f}{X} │ {bin_color}{B}{bin_direction}{X} (score:{score_bin:+.2f} conf:{confidence:.0f}%) │ RSI:{rsi_val:.0f} │ Vol:{vol_str} │ {reg_str} │ {src_str}")
 
     # Line 5: Market
-    sys.stdout.write(f"\033[5;1H\033[K")
     time_color = R if time_remaining < 2 else Y if time_remaining < 5 else G
-    # Phase indicator
     if phase == 'EARLY':
         phase_str = f"{C}EARLY{X}"
     elif phase == 'MID':
@@ -604,22 +630,18 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         phase_str = f"{R}{B}CLOSING{X}"
     else:
         phase_str = f"{D}─{X}"
-    # Price to Beat info
     ptb_str = ""
     if price_to_beat > 0 and btc_price > 0:
         diff = btc_price - price_to_beat
         diff_color = G if diff >= 0 else R
         ptb_str = f" │ Beat: {W}${price_to_beat:,.2f}{X} ({diff_color}{diff:+,.2f}{X})"
-    sys.stdout.write(f" {Y}MARKET  {X}│ {market_slug} │ Closes in: {time_color}{time_remaining:.1f}min{X} │ {phase_str}{ptb_str}")
+    buf.write(f"\033[5;1H\033[K {Y}MARKET  {X}│ {market_slug} │ Closes in: {time_color}{time_remaining:.1f}min{X} │ {phase_str}{ptb_str}")
 
     # Line 6: Polymarket
-    sys.stdout.write(f"\033[6;1H\033[K")
-    sys.stdout.write(f" {G}POLY    {X}│ UP: {G}${up_buy:.2f}{X}/{G}${1.0 - down_buy:.2f}{X} ({G}{up_buy * 100:.0f}%{X}) │ DOWN: {R}${down_buy:.2f}{X}/{R}${1.0 - up_buy:.2f}{X} ({R}{down_buy * 100:.0f}%{X})")
+    buf.write(f"\033[6;1H\033[K {G}POLY    {X}│ UP: {G}${up_buy:.2f}{X}/{G}${1.0 - down_buy:.2f}{X} ({G}{up_buy * 100:.0f}%{X}) │ DOWN: {R}${down_buy:.2f}{X}/{R}${1.0 - up_buy:.2f}{X} ({R}{down_buy * 100:.0f}%{X})")
 
     # Line 7: Positions + Session P&L
-    sys.stdout.write(f"\033[7;1H\033[K")
     pnl_color = G if session_pnl >= 0 else R
-    # Compute running stats from trade_history
     th = trade_history or []
     stats_str = ""
     if th:
@@ -633,7 +655,6 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         stats_str = f" │ {wr_color}WR:{wr:.0f}%{X}({G}{wins}W{X}/{R}{losses}L{X}) │ {W}PF:{pf:.1f}{X}"
     pnl_str = f"{pnl_color}{B}P&L: {'+' if session_pnl >= 0 else ''}${session_pnl:.2f}{X} {D}({trade_count} trades){X}{stats_str}"
     if positions:
-        # Aggregate by direction: total shares + weighted average price
         agg = {}
         for p in positions:
             d = p['direction']
@@ -647,19 +668,18 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
             avg_price = agg[d]['cost'] / total_sh if total_sh > 0 else 0
             p_color = G if d == 'up' else R
             parts.append(f"{p_color}{d.upper()} {total_sh:.0f}sh @ ${avg_price:.2f}{X}")
-        sys.stdout.write(f" {M}POSITION{X}│ {' │ '.join(parts)} │ {pnl_str}")
+        buf.write(f"\033[7;1H\033[K {M}POSITION{X}│ {' │ '.join(parts)} │ {pnl_str}")
     else:
-        sys.stdout.write(f" {M}POSITION{X}│ {D}None{X} │ {pnl_str}")
+        buf.write(f"\033[7;1H\033[K {M}POSITION{X}│ {D}None{X} │ {pnl_str}")
 
     # Line 8: Last action
-    sys.stdout.write(f"\033[8;1H\033[K")
     if last_action:
-        sys.stdout.write(f" {W}ACTION  {X}│ {last_action}")
+        buf.write(f"\033[8;1H\033[K {W}ACTION  {X}│ {last_action}")
     else:
-        sys.stdout.write(f" {D}ACTION  {X}│ {D}─{X}")
+        buf.write(f"\033[8;1H\033[K {D}ACTION  {X}│ {D}─{X}")
 
     # Line 9: Signal
-    sys.stdout.write(f"\033[9;1H\033[K")
+    buf.write(f"\033[9;1H\033[K")
     if signal:
         s_dir = signal['direction']
         strength = signal['strength']
@@ -669,8 +689,6 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         elif s_dir == 'DOWN': s_color, s_sym = R, '▼'
         else: s_color, s_sym = D, '─'
         trend = signal.get('trend', 0)
-        sr_raw = signal.get('sr_raw', 0)
-        sr_adj = signal.get('sr_adj', 0)
         rsi_s = signal.get('rsi', 50)
         rsi_arrow = '↑' if rsi_s < 45 else '↓' if rsi_s > 55 else '─'
         rsi_color = G if rsi_s < 40 else R if rsi_s > 60 else D
@@ -684,40 +702,39 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         bb_p = signal.get('bb_pos', 0.5)
         bb_color = G if bb_p > 0.80 else R if bb_p < 0.20 else D
         bb_str = f"{bb_color}BB:{bb_p:.0%}{X}"
-        sys.stdout.write(f" {W}SIGNAL  {X}│ {s_color}{B}{s_sym} {s_dir:<7s} {strength:>3d}%{X} [{bar_s}] │ {rsi_color}RSI:{rsi_s:.0f}{rsi_arrow}{X} │ {t_str} │ {macd_str} │ {vwap_str} │ {bb_str}")
+        buf.write(f" {W}SIGNAL  {X}│ {s_color}{B}{s_sym} {s_dir:<7s} {strength:>3d}%{X} [{bar_s}] │ {rsi_color}RSI:{rsi_s:.0f}{rsi_arrow}{X} │ {t_str} │ {macd_str} │ {vwap_str} │ {bb_str}")
     else:
-        sys.stdout.write(f" {W}SIGNAL  {X}│ {D}Waiting for data...{X}")
+        buf.write(f" {W}SIGNAL  {X}│ {D}Waiting for data...{X}")
 
     # Line 10: Alert / Status message
-    sys.stdout.write(f"\033[10;1H\033[K")
+    buf.write(f"\033[10;1H\033[K")
     if status_msg:
-        sys.stdout.write(f" {Y}{B}STATUS  {X}│ {status_msg}")
+        buf.write(f" {Y}{B}STATUS  {X}│ {status_msg}")
     elif alert_active:
         alert_color = G if alert_side == "UP" else R
-        sys.stdout.write(f" {Y}{B}ALERT   {X}│ {alert_color}{B}{alert_side} @ ${alert_price:.2f}{X} (>= ${PRICE_ALERT:.2f})")
+        buf.write(f" {Y}{B}ALERT   {X}│ {alert_color}{B}{alert_side} @ ${alert_price:.2f}{X} (>= ${PRICE_ALERT:.2f})")
     else:
-        sys.stdout.write(f" {D}ALERT   {X}│ {D}─{X}")
+        buf.write(f" {D}ALERT   {X}│ {D}─{X}")
 
     # Line 11: separator
-    sys.stdout.write(f"\033[11;1H\033[K")
-    sys.stdout.write(f" {'─' * (w - 2)}")
+    buf.write(f"\033[11;1H\033[K {'─' * (w - 2)}")
 
     # Line 12: Hotkeys
-    sys.stdout.write(f"\033[12;1H\033[K")
-    sys.stdout.write(f" {W}{B}U{X}{D}=buy UP{X} │ {W}{B}D{X}{D}=buy DOWN{X} │ {W}{B}C{X}{D}=close all{X} │ {W}{B}S{X}{D}=accept signal{X} │ {W}{B}Q{X}{D}=exit{X}")
+    buf.write(f"\033[12;1H\033[K {W}{B}U{X}{D}=buy UP{X} │ {W}{B}D{X}{D}=buy DOWN{X} │ {W}{B}C{X}{D}=close all{X} │ {W}{B}S{X}{D}=accept signal{X} │ {W}{B}Q{X}{D}=exit{X}")
 
-    # Line 13: bottom separator (full width)
-    sys.stdout.write(f"\033[13;1H\033[K")
-    sys.stdout.write(f" {C}{B}{'═' * (w - 2)}{X}")
+    # Line 13: bottom separator
+    buf.write(f"\033[13;1H\033[K {C}{B}{'═' * (w - 2)}{X}")
 
     # Line 14: column headers
-    sys.stdout.write(f"\033[14;1H\033[K")
-    sys.stdout.write(f"   {D}{'TIME':8s} │ {'BTC':>12s} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>7s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>6s} │ {'S/R':>13s} │ {'REGIME':6s}{X}")
+    buf.write(f"\033[14;1H\033[K   {D}{'TIME':8s} │ {'BTC':>12s} │ {'UP':>8s} {'DN':>8s} │ {'RSI':>7s} │ {'SIGNAL  ─  STRENGTH':>27s} │ {'VOL':4s} │ {'TREND':>7s} │ {'MACD':>6s} │ {'VWAP':>6s} │ {'BB':>6s} │ {'S/R':>13s} │ {'REGIME':6s}{X}")
 
-    # Line 15: blank (space before log)
-    sys.stdout.write(f"\033[15;1H\033[K")
+    # Line 15: blank
+    buf.write(f"\033[15;1H\033[K")
 
-    sys.stdout.write("\033[u")  # restore cursor
+    buf.write("\033[u")  # restore cursor
+
+    # Single write + flush
+    sys.stdout.write(buf.getvalue())
     sys.stdout.flush()
 
 
@@ -883,11 +900,23 @@ def execute_close_market(client, token_up, token_down):
 # --- TP/SL monitoring ------------------------------------------------------------
 
 def monitor_tp_sl(token_id, tp, sl, tp_above, sl_above):
-    """Monitor price every 0.5s until TP, SL, or manual cancel (C key). Returns reason and price."""
+    """Monitor price until TP, SL, or manual cancel (C key).
+    Uses concurrent price fetch + key checking for lower latency."""
+    price = 0.0
     while True:
-        price = get_price(token_id, "BUY")
+        # Fetch price concurrently while checking keys
+        fut_price = _executor.submit(get_price, token_id, "BUY")
+
+        # Check keys while waiting for price (5 × 0.1s = 0.5s)
+        for _ in range(5):
+            key = read_key_nb()
+            if key == 'c':
+                fut_price.result()  # don't leak the future
+                return 'CANCEL', price if price > 0 else get_price(token_id, "BUY")
+            time.sleep(0.1)
+
+        price = fut_price.result()
         if price <= 0:
-            time.sleep(0.5)
             continue
 
         now = datetime.now().strftime("%H:%M:%S")
@@ -908,13 +937,6 @@ def monitor_tp_sl(token_id, tp, sl, tp_above, sl_above):
         bar = f"{G}{'█' * bar_pos}{X}{R}{'█' * (10 - bar_pos)}{X}"
         sys.stdout.write(f"\r   {D}{now}{X} | ${price:.2f} | SL ${sl:.2f} [{bar}] TP ${tp:.2f} │ {D}C=close{X}   ")
         sys.stdout.flush()
-
-        # Check for cancel key (C) — 5 checks over 0.5s
-        for _ in range(5):
-            key = read_key_nb()
-            if key == 'c':
-                return 'CANCEL', price
-            time.sleep(0.1)
 
 
 # --- Hotkey buy ------------------------------------------------------------------
@@ -953,7 +975,9 @@ def main():
     session_start_str = datetime.now().strftime("%H:%M:%S")
     trade_history = []  # list of individual trade P&L values
 
-    # -- Donation banner --
+    # -- Clear screen and donation banner --
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
     DONATION_WALLET = "0xa27Bf6B2B26594f8A1BF6Ab50B00Ae0e503d71F6"
     print()
     print(f"  {Y}{B}{'═' * 62}{X}")
@@ -1144,11 +1168,10 @@ def main():
                         pass
                     continue
 
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    fut_up = pool.submit(get_price, token_up, "BUY")
-                    fut_dn = pool.submit(get_price, token_down, "BUY")
-                    up_buy = fut_up.result()
-                    down_buy = fut_dn.result()
+                fut_up = _executor.submit(get_price, token_up, "BUY")
+                fut_dn = _executor.submit(get_price, token_down, "BUY")
+                up_buy = fut_up.result()
+                down_buy = fut_dn.result()
                 if up_buy <= 0:
                     sleep_with_key(2)
                     continue
@@ -1366,6 +1389,8 @@ def main():
     finally:
         # Stop WebSocket
         binance_ws.stop()
+        # Shutdown thread pool
+        _executor.shutdown(wait=False)
         # Restore terminal
         sys.stdout.write("\033[r")  # reset scroll region
         sys.stdout.flush()

@@ -72,19 +72,21 @@ Documento gerado a partir da análise de 3 especialistas (Arquitetura, Trading, 
 - **Esforço**: Médio
 - **Arquivos**: `radar_poly.py` — `monitor_tp_sl()` (ou nova lógica non-blocking)
 
-#### 6. `requests.Session()` Persistente (Fase 7)
+#### 6. `requests.Session()` Persistente (Fase 7) ✅
 - **Problema**: `get_price()` cria uma nova conexão HTTP a cada chamada (`requests.get()`). Com 2+ chamadas por ciclo (UP + DOWN), são ~4 conexões TCP novas por segundo no modo WebSocket.
 - **Solução**: Criar `requests.Session()` global ou por módulo para reutilizar conexões HTTP via keep-alive.
-- **Impacto**: Médio — reduz ~100ms de overhead por ciclo
+- **Impacto**: CRITICAL — cada requests.get() abre nova conexão TCP (+50-500ms por request)
 - **Esforço**: Baixo
 - **Arquivos**: `radar_poly.py` (`get_price()`), `binance_api.py`, `polymarket_api.py`
+- **Status**: ✅ Implementado — sessions globais em todos os 3 módulos
 
-#### 7. ThreadPoolExecutor Persistente
-- **Problema**: `ThreadPoolExecutor(max_workers=2)` é criado e destruído a cada ciclo (linha 930). No modo WebSocket (~2 ciclos/s), são ~2 criações/destruições por segundo.
-- **Solução**: Criar o pool uma vez antes do loop principal e reutilizá-lo.
-- **Impacto**: Médio — reduz overhead de threads
+#### 7. ThreadPoolExecutor Persistente ✅
+- **Problema**: `ThreadPoolExecutor(max_workers=2)` é criado e destruído a cada ciclo (linha 1149). No modo WebSocket (~2 ciclos/s), são 1800+ criações/destruições por hora.
+- **Solução**: Criar o pool uma vez no nível do módulo e reutilizá-lo.
+- **Impacto**: HIGH — overhead de criação/destruição de threads a cada 0.5-2s
 - **Esforço**: Baixo
-- **Arquivos**: `radar_poly.py` — mover `ThreadPoolExecutor` para antes do `while True`
+- **Arquivos**: `radar_poly.py` — mover `ThreadPoolExecutor` para nível do módulo
+- **Status**: ✅ Implementado — pool persistente com shutdown no finally
 
 #### 8. Extrair Funções `handle_buy()` e `handle_close()` (DRY)
 - **Problema**: A lógica de compra está duplicada em 3 locais:
@@ -136,12 +138,13 @@ Documento gerado a partir da análise de 3 especialistas (Arquitetura, Trading, 
 - **Esforço**: Baixo
 - **Arquivos**: `radar_poly.py` — `compute_signal()`
 
-#### 14. Connection Pooling (Fase 7)
+#### 14. Connection Pooling (Fase 7) ✅
 - **Problema**: `binance_api.py` e `polymarket_api.py` criam conexões HTTP individuais por request.
 - **Solução**: Usar `requests.Session()` em cada módulo para reusar conexões.
 - **Impacto**: Baixo — complementa item 6
 - **Esforço**: Baixo
 - **Arquivos**: `binance_api.py`, `polymarket_api.py`
+- **Status**: ✅ Implementado junto com item 6
 
 #### 15. Failed VWAP Reclaim Detection (Fase 7)
 - **Problema**: Quando preço cruza VWAP para cima mas falha em se manter, é um forte sinal DOWN. Atualmente não detectado.
@@ -248,6 +251,66 @@ Solução: `PanelState` dataclass — atualizar campos individuais, passar objet
 | **Total** | | **~230 (38%)** | |
 
 Resultado: `main()` cai de **597 → ~370 linhas** e de **44 → ~30 variáveis**.
+
+---
+
+## Análise Detalhada: Performance (Especialista C)
+
+### 7 Problemas de Performance Identificados
+
+| # | Problema | Severidade | Local | Impacto |
+|---|---------|-----------|-------|---------|
+| 1 | Sem `requests.Session()` | CRITICAL | binance_api.py, polymarket_api.py, radar_poly.py | +50-500ms por request (nova conexão TCP) |
+| 2 | `get_price()` sem cache | CRITICAL | radar_poly.py:117 | 2-10 requests/s duplicados no monitor_tp_sl() |
+| 3 | ThreadPoolExecutor recriado a cada ciclo | HIGH | radar_poly.py:1149 | 1800+ criações/hora |
+| 4 | `monitor_tp_sl()` I/O bloqueante | HIGH | radar_poly.py:885 | Tempo de resposta 1+s |
+| 5 | 65+ sys.stdout.write() por redraw | MEDIUM | radar_poly.py:546-721 | 2200+ ops terminal/min |
+| 6 | Polling HTTP com WebSocket ativo | MEDIUM | binance_api.py:411 | HTTP desnecessário para indicadores |
+| 7 | Cópias de deque/list desnecessárias | LOW | radar_poly.py:165, ws_binance.py:108 | CPU/mem mínimo |
+
+### Detalhamento
+
+**1. HTTP Connection Reuse (CRITICAL)**
+- Cada `requests.get()` sem Session abre nova conexão TCP: handshake 50-100ms rede rápida, 200-500ms rede lenta
+- `get_price()` chamado 2x por ciclo (UP + DOWN), ciclo de 0.5s = 4 conexões/segundo
+- `check_limit()` faz 2 requests sequenciais no polymarket_api.py:254-269
+- **Fix**: `session = requests.Session()` no nível do módulo, trocar `requests.get()` → `session.get()`
+
+**2. get_price() Sem Cache (CRITICAL)**
+- Chamado em: close_all_positions (por posição), execute_buy_market (entry), execute_close_market (3x retry), monitor_tp_sl (cada 0.5s), main loop (UP+DOWN)
+- No `monitor_tp_sl()`: polling a cada 0.5s, cada HTTP leva 100-500ms
+- **Fix**: PriceCache com TTL de 0.5s para evitar duplicatas dentro do mesmo ciclo
+
+**3. ThreadPoolExecutor (HIGH)**
+- Linha 1149: `with ThreadPoolExecutor(max_workers=2) as pool:` dentro do loop
+- Criação de pool inclui: alocação de threads, inicialização de estado, locks
+- Com ciclo de 0.5s: ~7200 criações/destruições por hora
+- **Fix**: Pool persistente no nível do módulo, `executor.shutdown()` no finally
+
+**4. monitor_tp_sl() Blocking (HIGH)**
+- `get_price()` bloqueia por 100-500ms → ciclo real é 1+s ao invés de 0.5s
+- Key checking acontece DEPOIS do fetch (não concorrente)
+- **Fix**: Fetch assíncrono + key checking concorrente via ThreadPoolExecutor
+
+**5. Terminal Rendering (MEDIUM)**
+- `draw_panel()` faz 66+ `sys.stdout.write()` individuais por redraw
+- Cada `flush()` dispara I/O para o terminal
+- 33+ redraws/min × 66 ops = 2200+ operações terminal/minuto
+- **Fix**: Acumular em `io.StringIO()`, único `write()` + `flush()`
+
+### Status de Implementação
+
+| # | Fix | Status |
+|---|-----|--------|
+| 1 | requests.Session() persistente | ✅ Implementado |
+| 2 | PriceCache com TTL | ✅ Implementado |
+| 3 | ThreadPoolExecutor persistente | ✅ Implementado |
+| 4 | monitor_tp_sl() concorrente | ✅ Implementado |
+| 5 | Batch terminal writes (StringIO) | ✅ Implementado |
+| 6 | Otimizar polling com WS ativo | ⬜ Pendente (requer mais análise) |
+| 7 | Eliminar cópias de deque | ✅ Implementado |
+
+**Estimativa combinada: 60-70% redução em latência de rede, 40-50% redução em overhead de CPU.**
 
 ---
 

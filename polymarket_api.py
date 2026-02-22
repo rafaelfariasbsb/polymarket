@@ -23,6 +23,9 @@ from py_clob_client.constants import POLYGON
 GAMMA = "https://gamma-api.polymarket.com"
 CLOB = "https://clob.polymarket.com"
 
+# Persistent HTTP session (reuses TCP connections via keep-alive)
+_session = requests.Session()
+
 # Polymarket Proxy Wallet Factory (Polygon)
 PROXY_FACTORY = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
 PROXY_INIT_CODE_HASH = bytes.fromhex(
@@ -162,7 +165,7 @@ def find_current_market():
     for ts in possible_timestamps:
         slug = f"btc-updown-15m-{ts}"
         try:
-            r = requests.get(f"{GAMMA}/events", params={"slug": slug}, timeout=10)
+            r = _session.get(f"{GAMMA}/events", params={"slug": slug}, timeout=10)
             if r.status_code == 200 and r.json():
                 ev = r.json()[0]
                 markets = ev.get("markets") or []
@@ -251,7 +254,7 @@ def check_limit(client, token_up, token_down, new_order_value):
     # Current prices to calculate USD value
     try:
         up_price = float(
-            requests.get(
+            _session.get(
                 f"{CLOB}/price",
                 params={"token_id": token_up, "side": "SELL"},
                 timeout=10,
@@ -262,7 +265,7 @@ def check_limit(client, token_up, token_down, new_order_value):
 
     try:
         down_price = float(
-            requests.get(
+            _session.get(
                 f"{CLOB}/price",
                 params={"token_id": token_down, "side": "SELL"},
                 timeout=10,

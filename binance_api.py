@@ -12,6 +12,9 @@ load_dotenv()
 
 BINANCE_API = "https://api.binance.com/api/v3"
 
+# Persistent HTTP session (reuses TCP connections via keep-alive)
+_session = requests.Session()
+
 # Configurable indicator periods
 RSI_PERIOD = int(os.getenv('RSI_PERIOD', '7'))
 MACD_FAST = int(os.getenv('MACD_FAST', '5'))
@@ -24,7 +27,7 @@ ADX_PERIOD = int(os.getenv('ADX_PERIOD', '7'))
 
 def get_btc_price():
     """Returns the current BTC/USDT price from Binance."""
-    r = requests.get(f"{BINANCE_API}/ticker/price", params={"symbol": "BTCUSDT"}, timeout=10)
+    r = _session.get(f"{BINANCE_API}/ticker/price", params={"symbol": "BTCUSDT"}, timeout=10)
     r.raise_for_status()
     return float(r.json()["price"])
 
@@ -39,7 +42,7 @@ def get_price_at_timestamp(timestamp_sec):
         float: BTC price at that timestamp, or 0.0 on error
     """
     try:
-        r = requests.get(
+        r = _session.get(
             f"{BINANCE_API}/klines",
             params={
                 "symbol": "BTCUSDT",
@@ -68,7 +71,7 @@ def get_klines(interval="1m", limit=15):
 
     Returns list of dicts with: open, high, low, close, volume, timestamp
     """
-    r = requests.get(
+    r = _session.get(
         f"{BINANCE_API}/klines",
         params={"symbol": "BTCUSDT", "interval": interval, "limit": limit},
         timeout=10,
