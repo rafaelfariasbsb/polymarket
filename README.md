@@ -128,4 +128,4 @@ If this tool helps you trade, consider sending a tip:
 
 ## License
 
-Private use only.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
