@@ -437,7 +437,7 @@ def format_scrolling_line(now_str, btc_price, up_buy, down_buy, signal, position
     col_up     = f"UP:{G}${up_buy:.2f}{X}"
     col_dn     = f"DN:{R}${down_buy:.2f}{X}"
     rsi_c = G if rsi_val < 40 else R if rsi_val > 60 else D
-    col_rsi    = f"{rsi_c}RSI:{rsi_val:>2.0f}{rsi_arrow}{X}"
+    col_rsi    = f"{rsi_c}RSI:{rsi_val:>3.0f}{rsi_arrow}{X}"
     col_signal = f"{color}{B}{sym} {s_dir:<7s} {strength:>3d}%{X}"
     col_bar    = f"{color}[{bar}]{X}"
     col_vol    = f"{Y}VOL↑{X}" if signal['high_vol'] else "    "
@@ -582,7 +582,8 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
                trade_amount, alert_active=False, alert_side="", alert_price=0.0,
                session_pnl=0.0, trade_count=0, regime="", phase="",
                data_source="http", status_msg="", price_to_beat=0.0, ws_status="",
-               trade_history=None, last_action="", asset_name="BTC"):
+               trade_history=None, last_action="", asset_name="BTC",
+               poly_latency_ms=0):
     """Redraws the static panel at the top (HEADER_LINES lines).
     Uses StringIO buffer for single write+flush (reduces terminal I/O)."""
     w = shutil.get_terminal_size().columns
@@ -638,7 +639,8 @@ def draw_panel(time_str, balance, btc_price, bin_direction, confidence, binance_
         diff = btc_price - price_to_beat
         diff_color = G if diff >= 0 else R
         ptb_str = f" │ Beat: {W}${price_to_beat:,.2f}{X} ({diff_color}{diff:+,.2f}{X})"
-    buf.write(f"\033[5;1H\033[K {Y}MARKET  {X}│ {market_slug} │ Closes in: {time_color}{time_remaining:.1f}min{X} │ {phase_str}{ptb_str}")
+    poly_lat_str = f" │ Poly:{Y}{poly_latency_ms:.0f}ms{X}" if poly_latency_ms > 0 else ""
+    buf.write(f"\033[5;1H\033[K {Y}MARKET  {X}│ {market_slug} │ Closes in: {time_color}{time_remaining:.1f}min{X} │ {phase_str}{ptb_str}{poly_lat_str}")
 
     # Line 6: Polymarket
     buf.write(f"\033[6;1H\033[K {G}POLY    {X}│ UP: {G}${up_buy:.2f}{X}/{G}${1.0 - down_buy:.2f}{X} ({G}{up_buy * 100:.0f}%{X}) │ DOWN: {R}${down_buy:.2f}{X}/{R}${1.0 - up_buy:.2f}{X} ({R}{down_buy * 100:.0f}%{X})")
@@ -991,6 +993,16 @@ def main():
     sys.stdout.flush()
     DONATION_WALLET = "0xa27Bf6B2B26594f8A1BF6Ab50B00Ae0e503d71F6"
     print()
+    print(f"  {C}{B}{'═' * 62}{X}")
+    print(f"  {C}{B}  POLYMARKET CRYPTO SCALPING RADAR{X}")
+    print(f"  {C}{'─' * 62}{X}")
+    print(f"  {W}  Real-time scalping tool for Polymarket updown markets.{X}")
+    print(f"  {W}  Monitors Binance price + 6 indicators (RSI, MACD, VWAP,{X}")
+    print(f"  {W}  Bollinger, S/R, ADX) to generate UP/DOWN signals with{X}")
+    print(f"  {W}  regime detection and phase-aware thresholds.{X}")
+    print(f"  {D}  Asset: {G}{config.display_name}{D} │ Window: {G}{config.window_min}m{D} │ Trade: {G}${trade_amount:.0f}{X}")
+    print(f"  {C}{'═' * 62}{X}")
+    print()
     print(f"  {Y}{B}{'═' * 62}{X}")
     print(f"  {Y}{B}  If this tool helps you trade, consider supporting the dev!  {X}")
     print(f"  {Y}{B}{'═' * 62}{X}")
@@ -1089,6 +1101,7 @@ def main():
         alert_price = 0.0
         session_pnl = 0.0
         trade_count = 0
+        poly_latency_ms = 0
         status_msg = ""
         status_clear_at = 0  # timestamp to clear status_msg
         last_action = ""
@@ -1185,10 +1198,12 @@ def main():
                     sleep_with_key(2)
                     continue
 
+                _poly_t0 = time.time()
                 fut_up = _executor.submit(get_price, token_up, "BUY")
                 fut_dn = _executor.submit(get_price, token_down, "BUY")
                 up_buy = fut_up.result()
                 down_buy = fut_dn.result()
+                poly_latency_ms = (time.time() - _poly_t0) * 1000
                 if up_buy <= 0:
                     now_str = datetime.now().strftime("%H:%M:%S")
                     print(f"   {D}{now_str}{X} │ {Y}Token price unavailable (UP=${up_buy:.2f} DN=${down_buy:.2f}) — retrying...{X}")
@@ -1200,7 +1215,8 @@ def main():
                                status_msg=f"{Y}Token prices unavailable — retrying...{X}",
                                ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action, asset_name=config.display_name)
+                               last_action=last_action, asset_name=config.display_name,
+                               poly_latency_ms=poly_latency_ms)
                     sleep_with_key(2)
                     continue
 
@@ -1229,7 +1245,8 @@ def main():
                            regime=current_regime, phase=current_phase,
                            data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                            price_to_beat=price_to_beat, trade_history=trade_history,
-                           last_action=last_action, asset_name=config.display_name)
+                           last_action=last_action, asset_name=config.display_name,
+                           poly_latency_ms=poly_latency_ms)
 
                 # -- SCROLLING LOG --
                 s_dir = current_signal['direction']
@@ -1354,7 +1371,8 @@ def main():
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action, asset_name=config.display_name)
+                               last_action=last_action, asset_name=config.display_name,
+                               poly_latency_ms=poly_latency_ms)
                     msg = execute_close_market(client, token_up, token_down)
                     if positions:
                         total_pnl, cnt, session_pnl, pnl_list = close_all_positions(
@@ -1375,7 +1393,8 @@ def main():
                                regime=current_regime, phase=current_phase,
                                data_source=data_source, status_msg=status_msg, ws_status=binance_ws.status,
                                price_to_beat=price_to_beat, trade_history=trade_history,
-                               last_action=last_action, asset_name=config.display_name)
+                               last_action=last_action, asset_name=config.display_name,
+                               poly_latency_ms=poly_latency_ms)
                     status_clear_at = time.time() + 5
                 elif key == 'q':
                     raise KeyboardInterrupt
