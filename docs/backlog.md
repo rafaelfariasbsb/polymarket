@@ -51,12 +51,13 @@ Document generated from the analysis of 3 specialists (Architecture, Trading, Pe
 - **Effort**: Low
 - **Files**: `radar_poly.py` — market transition block (~line 860)
 
-#### 4. Periodically Re-sync Balance
+#### 4. Periodically Re-sync Balance ✅
 - **Problem**: `balance` is set once at startup (`get_balance(client)`) and then manually decremented/incremented on each trade. Over time, it diverges from the actual balance due to rounding, fees, and partially filled orders.
 - **Solution**: Call `get_balance(client)` every 60s (along with the market refresh) to correct the drift.
 - **Impact**: Medium — incorrect information on the panel
 - **Effort**: Low
 - **Files**: `radar_poly.py` — inside the `if now - last_market_check > 60` block
+- **Status**: ✅ Implemented — `get_balance(client)` called every 60s in the market refresh block
 
 ---
 
@@ -358,9 +359,9 @@ Result: `radar_poly.py` dropped from **1,591 → 712 lines (-55%)**. `TradingSes
 
 ### Sprint 2 — Reliability
 5. Market expiry real close (#3)
-6. Re-sync balance (#4)
-7. Persistent requests.Session() (#6)
-8. Persistent ThreadPoolExecutor (#7)
+6. Re-sync balance (#4) ✅
+7. Persistent requests.Session() (#6) ✅
+8. Persistent ThreadPoolExecutor (#7) ✅
 
 ### Sprint 3 — Refactoring ✅
 9. Extract handle_buy/handle_close (#8) ✅
@@ -556,21 +557,13 @@ Result: `radar_poly.py` dropped from **1,591 → 712 lines (-55%)**. `TradingSes
 - **Effort**: Low (adjust 3-4 comparisons)
 - **Files**: `radar_poly.py` — `compute_signal()` components 4 (MACD) and 5 (VWAP)
 
-#### T11. Recover existing positions on startup
+#### T11. Recover existing positions on startup ✅
 - **Problem**: `positions = []` is initialized empty at the start of main(). If the script crashes and restarts, it doesn't know about existing positions in the UP/DOWN tokens. The trader may have shares that don't appear on the panel, and the session P&L starts wrong.
-- **Solution**: On startup, after obtaining token_up/token_down, query positions:
-  ```python
-  up_shares = get_token_position(client, token_up)
-  down_shares = get_token_position(client, token_down)
-  if up_shares > 0.01:
-      up_price = get_price(token_up, "SELL")
-      positions.append({'direction': 'up', 'price': up_price, 'shares': up_shares, 'time': now_str})
-      print(f"Recovered UP position: {up_shares:.0f}sh @ ${up_price:.2f}")
-  # same for down_shares
-  ```
+- **Solution**: `sync_positions()` in `src/trade_executor.py` queries `get_token_position()` for both UP/DOWN tokens, compares with local tracking, and adds/removes positions accordingly.
 - **Impact**: MEDIUM — resilience to crashes + correct information on panel
-- **Effort**: Low (15 lines)
-- **Files**: `radar_poly.py` — after `find_current_market()`, before the main loop
+- **Effort**: Low
+- **Files**: `src/trade_executor.py` — `sync_positions()`, `radar_poly.py` — startup + periodic sync
+- **Status**: ✅ Implemented — `sync_positions()` called on startup (detects existing positions) and every 60s in the market refresh block (detects buys/sells made directly on Polymarket's web interface). Balance also re-synced via `get_balance()` on each refresh.
 
 #### T12. Longer Divergence lookback
 - **Problem**: The Divergence component (BTC vs Polymarket price) looks at only 6 past cycles (~12 seconds with 2s cycle, ~3s with WS). In crypto, 12-second movements are pure noise — any micro-fluctuation generates false "divergence".
@@ -671,7 +664,7 @@ Result: `radar_poly.py` dropped from **1,591 → 712 lines (-55%)**. `TradingSes
 
 ### Sprint T4 — Advanced Execution
 11. Non-blocking TP/SL (T6) — Full view during position
-12. Recover positions on startup (T11) — Resilience
+12. Recover positions on startup (T11) — Resilience ✅
 13. S/R at BTC levels (T13) — More predictive S/R
 14. Volume as multiplier (T14) — Signal confirmation
 15. Spread monitoring (T15) — Liquidity information

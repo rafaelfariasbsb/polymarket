@@ -13,6 +13,7 @@ Real-time scalping radar for Polymarket crypto Up/Down markets (BTC, ETH, SOL, X
 - **Manual hotkey trading** — Press U/D/C/S/Q to buy UP, buy DOWN, close all, accept a signal, or exit
 - **TP/SL monitoring** — Visual progress bar tracking take-profit and stop-loss levels
 - **Multi-market support** — BTC, ETH, SOL, XRP with 5-minute or 15-minute windows
+- **Position sync** — Auto-detects positions opened/closed directly on the Polymarket website
 - **Session stats** — Win rate, P&L, profit factor, and max drawdown
 - **Fully configurable** — 29 parameters via `.env`
 

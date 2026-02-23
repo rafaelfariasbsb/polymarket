@@ -573,6 +573,14 @@ Line 15: blank
 
 **Functions:**
 
+**`sync_positions(client, token_up, token_down, positions, get_price) -> list[tuple]`**
+- Syncs local positions with actual on-chain balances (detects buys/sells made on the Polymarket web interface).
+- Compares `get_token_position()` (actual shares) with the sum of local `positions` per direction.
+- If actual > local by >= 1 share → adds recovered position (entry price = current SELL price, `source='platform'`).
+- If actual < local by >= 1 share → removes positions (LIFO order).
+- Returns list of `(direction, shares, price, action)` tuples describing changes (`action`: `'added'` or `'removed'`).
+- Called on startup and every 60s in the market refresh block.
+
 **`close_all_positions(positions, token_up, token_down, trade_logger, reason, session_pnl, trade_history, get_price) -> (total_pnl, count, session_pnl, pnl_list)`**
 - Closes all positions and calculates P&L for each.
 - `reason`: `'market_expired'`, `'emergency'`, `'exit'`, `'tp'`, `'sl'`, `'cancel'`
@@ -647,11 +655,14 @@ The main event loop:
 6.  Connect to Polymarket (create_client)
 7.  Discover active market (find_current_market)
 8.  Fetch Price to Beat
-9.  Start Binance WebSocket
-10. Configure terminal (cbreak mode, scroll region)
+9.  Sync existing positions from platform (sync_positions)
+10. Start Binance WebSocket
+11. Configure terminal (cbreak mode, scroll region)
 11. Main loop:
     a. Auto-clear status messages after 3s
     b. Refresh market every 60s (with exponential backoff on errors)
+    b1. Sync positions with platform (detect buys/sells from web UI)
+    b2. Re-sync USDC balance via get_balance()
     c. Auto-recover WebSocket if dead
     d. Collect Binance data (WS preferred, HTTP fallback)
        - On error: exponential backoff: delay = min(2 * 2^errors, 30)

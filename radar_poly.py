@@ -74,6 +74,7 @@ from signal_engine import compute_signal, get_market_phase, TP_MAX_PRICE, SL_MIN
 from ui_panel import draw_panel, format_scrolling_line, HEADER_LINES
 from trade_executor import (
     handle_buy, execute_close_market, close_all_positions, monitor_tp_sl,
+    sync_positions,
 )
 from input_handler import wait_for_key, sleep_with_key
 from session_stats import print_session_summary
@@ -283,6 +284,18 @@ def main():
     except (ValueError, IndexError, requests.RequestException) as e:
         logger.debug("Price to beat fetch error: %s", e)
 
+    # Sync existing positions (bought directly on Polymarket platform)
+    print(f"   Checking existing positions...", end="", flush=True)
+    changes = sync_positions(client, session.token_up, session.token_down,
+                             session.positions, get_price)
+    if changes:
+        print(f" {G}✓{X} Found {len(changes)} position(s):")
+        for direction, shares, price, action in changes:
+            d_color = G if direction == 'up' else R
+            print(f"      {d_color}● {direction.upper()}{X} {shares:.0f}sh @ ${price:.2f} (from platform)")
+    else:
+        print(f" {D}─{X} No existing positions")
+
     # Start Binance WebSocket
     binance_ws = BinanceWS(symbol=config.ws_symbol)
     print(f"   Connecting to Binance WS...", end="", flush=True)
@@ -379,6 +392,28 @@ def main():
                         session.token_down = new_token_down
                         session.base_time = time_remaining
                         session.last_market_check = now
+
+                        # Sync positions with platform (detect buys/sells made outside the radar)
+                        try:
+                            changes = sync_positions(
+                                client, session.token_up, session.token_down,
+                                session.positions, get_price)
+                            if changes:
+                                for direction, shares, price, action in changes:
+                                    d_color = G if direction == 'up' else R
+                                    if action == 'added':
+                                        print(f"   {C}{B}SYNC{X} {d_color}● {direction.upper()}{X} +{shares:.0f}sh @ ${price:.2f} {D}(detected on platform){X}")
+                                    else:
+                                        print(f"   {C}{B}SYNC{X} {d_color}● {direction.upper()}{X} -{shares:.0f}sh {D}(sold on platform){X}")
+                        except Exception as e:
+                            logger.debug("Position sync error: %s", e)
+
+                        # Re-sync balance with platform
+                        try:
+                            session.balance = get_balance(client)
+                        except Exception as e:
+                            logger.debug("Balance sync error: %s", e)
+
                     except (requests.RequestException, KeyError, ValueError) as e:
                         session.market_refresh_errors += 1
                         logger.debug("Market refresh error (attempt %d): %s",

@@ -134,6 +134,8 @@ At any time, press:
 - **`U`** → Buy UP (bet that price goes up)
 - **`D`** → Buy DOWN (bet that price goes down)
 
+You can also buy directly on the **Polymarket website**. The radar automatically detects positions opened outside the script (every 60 seconds) and adds them to the panel display. On startup, it also checks for existing positions.
+
 ### 4.3 Entry Checklist (ideal)
 
 ```
@@ -202,7 +204,10 @@ The TP spread scales with confidence:
 - **`C`** → Closes ALL positions immediately (emergency close)
 - Use when the scenario has changed drastically (e.g. regime turned CHOP)
 
-### 5.3 Exit Rules
+### 5.3 Position Sync
+The radar automatically syncs with the Polymarket platform every 60 seconds. If you **sell directly on the website**, the radar detects the sale and removes the position from its tracking. Similarly, your USDC balance is re-synced from the platform on each refresh.
+
+### 5.4 Exit Rules
 
 ```
 📊 TP hit → Profit realized automatically

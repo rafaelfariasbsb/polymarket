@@ -32,6 +32,69 @@ CLOSE_MONITOR_TIMEOUT = 15    # seconds to wait for close order fill
 TP_SL_MONITOR_TIMEOUT = 600   # seconds before TP/SL monitoring times out
 
 
+def sync_positions(client, token_up, token_down, positions, get_price):
+    """Sync local positions with actual on-chain balances.
+
+    Detects shares bought/sold directly on Polymarket's web interface
+    and updates the local positions list accordingly.
+
+    Args:
+        client: ClobClient instance
+        token_up/token_down: token IDs for current market
+        positions: list of local position dicts (mutated in place)
+        get_price: callable(token_id, side) -> float
+
+    Returns:
+        list of (direction, shares, price, action) tuples describing changes.
+        action is 'added' or 'removed'.
+    """
+    changes = []
+
+    for direction, token_id in [('up', token_up), ('down', token_down)]:
+        try:
+            actual_shares = get_token_position(client, token_id)
+        except Exception as e:
+            logger.debug("sync_positions: error querying %s: %s", direction, e)
+            continue
+
+        # Sum shares tracked locally for this direction
+        local_shares = sum(p['shares'] for p in positions if p['direction'] == direction)
+
+        diff = actual_shares - local_shares
+
+        if diff >= 1.0:
+            # New shares detected (bought on platform) — add as recovered position
+            price = get_price(token_id, "SELL")
+            if price <= 0:
+                price = get_price(token_id, "BUY")
+            positions.append({
+                'direction': direction,
+                'price': price,
+                'shares': diff,
+                'time': datetime.now().strftime("%H:%M:%S"),
+                'source': 'platform',
+            })
+            changes.append((direction, diff, price, 'added'))
+
+        elif diff <= -1.0:
+            # Shares were sold on platform — remove from local tracking
+            to_remove = abs(diff)
+            # Remove from newest positions first (LIFO)
+            for p in reversed(list(positions)):
+                if p['direction'] != direction or to_remove <= 0:
+                    continue
+                if p['shares'] <= to_remove:
+                    to_remove -= p['shares']
+                    changes.append((direction, p['shares'], p['price'], 'removed'))
+                    positions.remove(p)
+                else:
+                    changes.append((direction, to_remove, p['price'], 'removed'))
+                    p['shares'] -= to_remove
+                    to_remove = 0
+
+    return changes
+
+
 def close_all_positions(positions, token_up, token_down, trade_logger, reason,
                         session_pnl, trade_history, get_price):
     """Close all positions and calculate P&L for each.
