@@ -6,6 +6,8 @@ Real-time scalping radar for Polymarket crypto Up/Down markets (BTC, ETH, SOL, X
 
 - **Real-time data** — Binance WebSocket for sub-second price updates (HTTP fallback)
 - **6-component signal engine** — RSI, MACD, VWAP, Bollinger Bands, divergence, S/R levels
+- **Mean reversion alerts** — Beeps when RSI extreme + Bollinger touch + MID phase align (~65% win rate)
+- **Position monitor** — TP/SL alerts with audio beeps for open positions
 - **Market regime detection** — Classifies market as TREND_UP, TREND_DOWN, RANGE, or CHOP via ADX
 - **Phase-aware trading** — Adjusts signal thresholds based on time remaining (EARLY/MID/LATE/CLOSING)
 - **Split-screen terminal UI** — Static panel (top) with live stats + scrolling log (bottom)
@@ -15,7 +17,7 @@ Real-time scalping radar for Polymarket crypto Up/Down markets (BTC, ETH, SOL, X
 - **Multi-market support** — BTC, ETH, SOL, XRP with 5-minute or 15-minute windows
 - **Position sync** — Auto-detects positions opened/closed directly on the Polymarket website
 - **Session stats** — Win rate, P&L, profit factor, and max drawdown
-- **Fully configurable** — 29 parameters via `.env`
+- **Fully configurable** — 32 parameters via `.env`
 
 ## Project Structure
 

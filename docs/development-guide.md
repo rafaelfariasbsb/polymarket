@@ -633,7 +633,7 @@ Encapsulates all mutable state for a trading session:
 | Trading state | `positions`, `balance`, `session_pnl`, `trade_count`, `trade_history`, `current_signal` |
 | Alert state | `alert_active`, `alert_side`, `alert_price` |
 | UI state | `status_msg`, `status_clear_at`, `last_action`, `poly_latency_ms` |
-| Timing | `last_beep`, `last_market_check` |
+| Timing | `last_beep`, `last_market_check`, `last_phase` |
 | Data history | `history` (deque, maxlen=60) |
 | Error tracking | `binance_errors`, `market_refresh_errors` |
 
@@ -673,10 +673,13 @@ The main event loop:
     i. Log signal snapshot
     j. Draw static panel (via ui_panel.draw_panel)
     k. Print scrolling log line (via ui_panel.format_scrolling_line)
-    l. Check for opportunity (beep + wait for key)
-    m. Handle price alerts (edge-triggered)
-    n. Sleep with key checking (0.5s WS / 2s HTTP)
-    o. Process hotkeys (U/D/C/Q)
+    l. Check for opportunity (visual + optional beep via SIGNAL_ENABLED)
+    m. Handle price alerts (edge-triggered, via PRICE_ALERT_ENABLED)
+    n. Mean Reversion Alert (MID + RSI extreme ≤15/≥85 + BB touch ≤0.10/≥0.90 + token < $0.70)
+    o. Price Beat Alert (visual only, MID + $PRICE_BEAT_ALERT distance from PTB)
+    p. Position Monitor (TP/SL alerts — TP: entry+$0.20 cap $0.55, SL: entry-$0.15 floor $0.05)
+    q. Sleep with key checking (0.5s WS / 2s HTTP)
+    r. Process hotkeys (U/D/C/Q)
 12. On exit: reset terminal, print session summary, log to CSV
 13. Finally: stop WS, shutdown executor, restore terminal settings
 ```
@@ -1104,13 +1107,13 @@ monitor_tp_sl(token_id, tp, sl, ..., get_price, executor)
                   (user creates)
 ```
 
-### Parameter Categories (29 total)
+### Parameter Categories (32 total)
 
 | Category | Count | Module |
 |---|---|---|
 | Credentials | 1 | `src/polymarket_api.py` |
 | Market selection | 2 | `src/market_config.py` |
-| Trading | 4 | `radar_poly.py` (TRADE_AMOUNT, PRICE_ALERT, SIGNAL_STRENGTH_BEEP) + `src/ui_panel.py` (PRICE_ALERT) |
+| Trading | 7 | `radar_poly.py` (TRADE_AMOUNT, PRICE_ALERT_ENABLED, PRICE_ALERT, SIGNAL_ENABLED, SIGNAL_STRENGTH_BEEP, PRICE_BEAT_ALERT) + `src/ui_panel.py` (PRICE_ALERT) |
 | Indicator periods | 7 | `src/binance_api.py` |
 | Signal weights | 6 | `src/signal_engine.py` |
 | Volatility | 2 | `src/signal_engine.py` |

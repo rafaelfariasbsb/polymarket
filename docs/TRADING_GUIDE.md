@@ -8,22 +8,24 @@ The radar combines **6 technical indicators** from Binance with real-time Polyma
 
 ## 1. The 6 Indicators
 
-### 1.1 Momentum (30% of signal)
-Combines RSI + Binance candle analysis.
+### 1.1 Momentum (25% of signal)
+Combines RSI + Binance candle analysis. RSI period: 5 (optimized for 15min).
 
 | RSI       | Reading              | Signal         |
 |-----------|----------------------|----------------|
-| < 25      | Heavily oversold     | Strong UP      |
+| < 15      | Extreme oversold     | **Mean Reversion UP** |
+| 15 – 25   | Heavily oversold     | Strong UP      |
 | 25 – 35   | Oversold             | Moderate UP    |
 | 35 – 45   | Slightly oversold    | Slight UP      |
 | 45 – 55   | Neutral              | No signal      |
 | 55 – 65   | Slightly overbought  | Slight DOWN    |
 | 65 – 75   | Overbought           | Moderate DOWN  |
-| > 75      | Heavily overbought   | Strong DOWN    |
+| 75 – 85   | Heavily overbought   | Strong DOWN    |
+| > 85      | Extreme overbought   | **Mean Reversion DOWN** |
 
 **Candles:** Last 5 candles — count of green/red, buyer vs seller volume, and momentum (average of last 3 vs previous 3).
 
-### 1.2 BTC vs Polymarket Divergence (20% of signal)
+### 1.2 BTC vs Polymarket Divergence (25% of signal)
 Detects when BTC price and Polymarket UP price move in opposite directions.
 
 | Situation | Interpretation |
@@ -45,8 +47,8 @@ Analyzes price position within the range of the last 20 candles.
 
 **Trend filter:** If the overall trend is strong and contrary to S/R, the signal is automatically reduced.
 
-### 1.4 MACD — Momentum Acceleration (15% of signal)
-Fast MACD (5/10/4) optimized for scalping.
+### 1.4 MACD — Momentum Acceleration (10% of signal)
+Standard MACD (12/26/9) — confirmation indicator, not primary driver.
 
 | Condition | Signal |
 |-----------|--------|
@@ -68,8 +70,8 @@ Fast MACD (5/10/4) optimized for scalping.
 
 **How to read on screen:** `+0.15↑` = price 0.15% above VWAP. `-0.08↓` = price 0.08% below.
 
-### 1.6 Bollinger Bands — Extremes and Squeeze (10% of signal)
-Bollinger Bands (14 periods, 2 standard deviations).
+### 1.6 Bollinger Bands — Extremes and Squeeze (15% of signal)
+Bollinger Bands (10 periods, 1.5 standard deviations — tighter for 15min, better squeeze detection).
 
 | Band Position | Signal |
 |---------------|--------|
@@ -136,42 +138,76 @@ At any time, press:
 
 You can also buy directly on the **Polymarket website**. The radar automatically detects positions opened outside the script (every 60 seconds) and adds them to the panel display. On startup, it also checks for existing positions.
 
-### 4.3 Entry Checklist (ideal)
+### 4.3 Mean Reversion Alert (Primary Strategy)
+
+The radar's primary alert is the **Mean Reversion Alert** — it beeps only when all conditions align for a high-probability mean reversion trade:
+
+**Trigger conditions (ALL must be true):**
+1. Market phase = **MID** (minutes 5-10 of 15min window)
+2. RSI at extreme level: **≤ 15** (oversold) or **≥ 85** (overbought)
+3. Bollinger Bands touch: **≤ 0.10** (lower band) or **≥ 0.90** (upper band)
+4. Reversal-side token price **< $0.70** (still cheap, not priced in)
+
+**When it beeps (3 beeps):**
+```
+═══════════════════════════════════════════════════════════
+  MEAN REVERSION → UP │ RSI=12 BB=0.05 │ $0.35
+  Token cheap + RSI extreme + Bollinger touch
+  Press U to buy or wait...
+═══════════════════════════════════════════════════════════
+```
+
+**What to do:**
+1. Check the direction (UP or DOWN)
+2. Press the corresponding key (**U** for UP, **D** for DOWN)
+3. The radar monitors TP/SL automatically (see section 5.1)
+4. Wait for TP alert or close manually with **C**
+
+**Expected performance:** ~65% win rate, TP = entry + $0.20 (cap at $0.55), SL = entry - $0.15 (floor at $0.05).
+
+### 4.4 Entry Checklist (ideal)
 
 ```
 ✅ Regime: TREND_UP or TREND_DOWN (avoid CHOP)
 ✅ Phase: MID (best) or EARLY with strong signal
 ✅ Strength: ≥ 50% (the higher, the better)
 ✅ Indicators aligned:
-   - Extreme RSI (< 35 for UP, > 65 for DOWN)
+   - Extreme RSI (< 15 for UP, > 85 for DOWN — mean reversion)
    - MACD accelerating in same direction
    - Price on the right side of VWAP
-   - Bollinger confirming (near extreme band)
+   - Bollinger confirming (touching extreme band)
 ✅ Volatility: VOL↑ present (amplifies gains)
 ✅ Divergence: BTC vs Poly divergent (correction likely)
 ```
 
-### 4.4 High Probability Scenarios
+### 4.5 High Probability Scenarios
 
-**Scenario 1 — Support Bounce:**
+**Scenario 1 — Mean Reversion (Primary):**
+```
+RSI ≤ 15 + BB ≤ 0.10 + MID phase + token < $0.70
+→ Strong UP signal — price at extreme, reversal expected
+→ The radar beeps automatically for this scenario
+```
+
+**Scenario 2 — Support Bounce:**
 ```
 RSI < 30 + BB position < 15% + VWAP rising + TREND_UP
 → Strong UP signal (price oversold with support)
 ```
 
-**Scenario 2 — MACD Breakout:**
+**Scenario 3 — MACD Breakout:**
 ```
 Strong positive MACD delta + BB squeeze + VOL↑ + Strength > 70%
 → Imminent breakout in MACD direction
 ```
 
-**Scenario 3 — Divergence + Trend:**
+**Scenario 4 — Divergence + Trend:**
 ```
 BTC rising + UP Poly stagnant + TREND_UP + RSI < 50
 → Polymarket will correct upward
 ```
 
-### 4.5 When NOT to Enter
+### 4.6 When NOT to Enter
 
 ```
 ❌ CHOP regime — chaotic market, signals are unreliable
@@ -185,10 +221,33 @@ BTC rising + UP Poly stagnant + TREND_UP + RSI < 50
 
 ## 5. When to Exit (Close Position)
 
-### 5.1 Automatic Exit (TP/SL)
-When accepting a signal with `S`, the radar automatically monitors:
-- **Take Profit (TP):** Target profit price (calculated from signal spread)
-- **Stop Loss (SL):** Protection price against loss
+### 5.1 Position Monitor (TP/SL Alerts)
+The radar continuously monitors all open positions and beeps when TP or SL levels are hit:
+
+**Mean Reversion TP/SL (for manual entries via U/D keys):**
+- **Take Profit (TP):** Entry + $0.20 (capped at $0.55)
+- **Stop Loss (SL):** Entry - $0.15 (floor at $0.05)
+
+| Entry Price | TP Target | SL Target | Risk:Reward |
+|-------------|-----------|-----------|-------------|
+| $0.30 | $0.50 | $0.15 | 1:1.3 |
+| $0.35 | $0.55 | $0.20 | 1:1.3 |
+| $0.40 | $0.55 | $0.25 | 1:1.0 |
+| $0.50 | $0.55 | $0.35 | 1:0.3 |
+
+**When TP is hit (2 beeps):**
+```
+  TP HIT │ UP $0.35 → $0.55 (+57%) │ Press C to close
+```
+
+**When SL is hit (1 beep):**
+```
+  SL HIT │ UP $0.35 → $0.20 (-43%) │ Press C to close
+```
+
+Press **C** to close all positions when alerted.
+
+**Signal-based TP/SL (for entries via S key):**
 
 The TP spread scales with confidence:
 | Strength | TP Spread | Example (entry $0.50) |
@@ -331,16 +390,22 @@ The "Beat" shows the price BTC needs to be at **by the end of the window**:
 
 ## 10. Advanced Tips
 
-1. **Combine indicators:** The best signal has extreme RSI + accelerating MACD + VWAP confirming. Don't rely on a single indicator.
+1. **Mean reversion is king:** The primary strategy for 15-minute windows. Wait for the radar to beep (RSI extreme + BB touch + MID phase) and trade the reversal. ~65% win rate historically.
 
-2. **Watch the divergence:** When BTC moves strongly and Polymarket doesn't follow, the Poly usually "corrects" — that's the opportunity.
+2. **Buy the CHEAP token:** On mean reversion, you buy the side that's currently losing. If BTC is oversold (RSI < 15), buy UP — which is cheap because the market expects DOWN. That's where the edge is.
 
-3. **Bollinger Squeeze:** Narrow bands → imminent breakout. If the squeeze coincides with MACD crossing, it's a powerful setup.
+3. **Don't hold until expiry:** Take profit early when the position monitor alerts TP hit. Mean reversion trades often spike quickly then flatten. Early exit at TP captures most of the move.
 
-4. **Trend is your friend:** In TREND_UP, favor UP buys even with moderate signals. Against the trend, require very strong signals (>70%).
+4. **Combine indicators:** The best signal has extreme RSI + accelerating MACD + VWAP confirming. Don't rely on a single indicator.
 
-5. **High volatility = wider spread:** When VOL↑ appears, both gains and losses are amplified. Ideal for those seeking quick TP.
+5. **Watch the divergence:** When BTC moves strongly and Polymarket doesn't follow, the Poly usually "corrects" — that's the opportunity.
 
-6. **Monitor your session P&L:** If you lost 3 trades in a row (win rate dropping), stop and wait for better conditions. The market will be there tomorrow.
+6. **Bollinger Squeeze:** Narrow bands → imminent breakout. If the squeeze coincides with MACD crossing, it's a powerful setup.
 
-7. **Price to Beat near current price:** When the difference is small ($0–$50), the market is undecided. These are the best moments for divergence signals.
+7. **Trend is your friend:** In TREND_UP, favor UP buys even with moderate signals. Against the trend, require very strong signals (>70%).
+
+8. **High volatility = wider spread:** When VOL↑ appears, both gains and losses are amplified. Ideal for those seeking quick TP.
+
+9. **Monitor your session P&L:** If you lost 3 trades in a row (win rate dropping), stop and wait for better conditions. The market will be there tomorrow.
+
+10. **Price to Beat near current price:** When the difference is small ($0–$50), the market is undecided. These are the best moments for divergence signals.

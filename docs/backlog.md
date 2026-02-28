@@ -18,7 +18,7 @@ Document generated from the analysis of 3 specialists (Architecture, Trading, Pe
 | 4 | Dynamic TP/SL & Trailing Stop | ⬜ Pending |
 | 5 | Session Win Rate & Performance Stats | ✅ Complete |
 | 6 | WebSocket Real-Time Data | ✅ Complete |
-| 7 | Minor Improvements | ⬜ Partial |
+| 7 | Minor Improvements | ✅ Complete |
 | 8 | Multi-Market Support | ✅ Complete |
 
 ---
@@ -163,6 +163,45 @@ Document generated from the analysis of 3 specialists (Architecture, Trading, Pe
 - **Impact**: Low — reduces gap between markets
 - **Effort**: Low
 - **Files**: `radar_poly.py` — market refresh logic
+
+---
+
+### RECENTLY COMPLETED (v1.0.1)
+
+#### 17. Mean Reversion Alert System ✅
+- **Problem**: No audio alert for the highest-probability trading setup (mean reversion at RSI extremes + Bollinger touch).
+- **Solution**: Added Mean Reversion Alert that beeps when: MID phase + RSI ≤ 15 or ≥ 85 + BB ≤ 0.10 or ≥ 0.90 + reversal-side token < $0.70. This is now the **only beep** in the system (all other beeps disabled by default).
+- **Impact**: High — guides trader to highest-probability entries
+- **Files**: `radar_poly.py` — main loop alert block
+- **Status**: ✅ Implemented
+
+#### 18. Position Monitor with TP/SL Alerts ✅
+- **Problem**: After opening a position, no audio feedback when TP or SL levels are reached.
+- **Solution**: Continuous monitoring of all open positions. TP = entry + $0.20 (cap $0.55), SL = entry - $0.15 (floor $0.05). Beeps on hit (2 beeps for TP, 1 for SL) with 15s cooldown.
+- **Impact**: High — trader can focus on other tasks while monitoring runs
+- **Files**: `radar_poly.py` — main loop position monitor block
+- **Status**: ✅ Implemented
+
+#### 19. Research-Optimized Indicator Settings ✅
+- **Problem**: Default indicator periods and weights were not optimized for 15-minute mean reversion strategy.
+- **Solution**: Updated defaults based on research — RSI=5 (from 7), MACD=12/26/9 (from 5/10/4), BB=10/1.5 (from 14/2.0), ADX=14 (from 7). Weights rebalanced: divergence 25% (from 20%), bollinger 15% (from 10%), MACD 10% (from 15%).
+- **Impact**: High — better signal quality for mean reversion
+- **Files**: `.env.example`, `src/binance_api.py` (BB_STD int→float fix)
+- **Status**: ✅ Implemented
+
+#### 20. Configurable Alert Toggles ✅
+- **Problem**: No way to disable individual alert types (price alert, signal opportunity) without modifying code.
+- **Solution**: Added `PRICE_ALERT_ENABLED`, `SIGNAL_ENABLED`, and `PRICE_BEAT_ALERT` variables to `.env`. Default disabled in `.env` for users who prefer mean reversion only.
+- **Impact**: Medium — flexibility for different trading styles
+- **Files**: `radar_poly.py`, `.env.example`
+- **Status**: ✅ Implemented
+
+#### 21. Position Sync with Polymarket Platform ✅
+- **Problem**: Positions opened/closed directly on the Polymarket website were not reflected in the radar.
+- **Solution**: Every 60 seconds, sync positions from the platform via API. Detects new positions opened outside the script and positions closed on the website. Balance also re-synced.
+- **Impact**: High — seamless integration with web UI
+- **Files**: `radar_poly.py`, `src/polymarket_api.py`
+- **Status**: ✅ Implemented
 
 ---
 
