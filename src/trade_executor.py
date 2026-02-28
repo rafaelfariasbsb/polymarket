@@ -289,7 +289,7 @@ def monitor_tp_sl(token_id, tp, sl, tp_above, sl_above, get_price, executor,
 
 def execute_hotkey(client, direction, trade_amount, token_up, token_down,
                    get_price, executor):
-    """Execute manual buy via hotkey (u/d). Returns buy info or None."""
+    """Execute manual buy via hotkey (u/d). Returns (buy_info, error_msg)."""
     result, msg = execute_buy_market(client, direction, trade_amount, token_up, token_down,
                                      get_price, executor, quiet=True)
     exec_time = datetime.now().strftime("%H:%M:%S")
@@ -302,9 +302,9 @@ def execute_hotkey(client, direction, trade_amount, token_up, token_down,
             'price': result['price'],
             'shares': result['shares'],
             'time': exec_time,
-        }
+        }, None
     else:
-        return None
+        return None, msg
 
 
 def handle_buy(client, direction, trade_amount, token_up, token_down,
@@ -319,8 +319,8 @@ def handle_buy(client, direction, trade_amount, token_up, token_down,
     Returns:
         (info_dict_or_None, updated_balance, last_action_str)
     """
-    info = execute_hotkey(client, direction, trade_amount, token_up, token_down,
-                          get_price, executor)
+    info, error_msg = execute_hotkey(client, direction, trade_amount, token_up, token_down,
+                                     get_price, executor)
     if info:
         d_color = G if direction == 'up' else R
         last_action = f"{d_color}{B}BUY {direction.upper()}{X} {info['shares']:.0f}sh @ ${info['price']:.2f} │ {D}{reason}{X}"
@@ -329,5 +329,5 @@ def handle_buy(client, direction, trade_amount, token_up, token_down,
         trade_logger.log_trade("BUY", direction, info['shares'], info['price'],
                                info['shares'] * info['price'], reason, 0, session_pnl)
     else:
-        last_action = f"{R}✗ BUY {direction.upper()} FAILED{X}"
+        last_action = f"{R}✗ BUY {direction.upper()} FAILED{X} │ {error_msg or 'unknown error'}"
     return info, balance, last_action

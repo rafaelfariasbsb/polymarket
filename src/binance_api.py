@@ -26,7 +26,7 @@ MACD_FAST = int(os.getenv('MACD_FAST', '5'))
 MACD_SLOW = int(os.getenv('MACD_SLOW', '10'))
 MACD_SIGNAL = int(os.getenv('MACD_SIGNAL', '4'))
 BB_PERIOD = int(os.getenv('BB_PERIOD', '14'))
-BB_STD = int(os.getenv('BB_STD', '2'))
+BB_STD = float(os.getenv('BB_STD', '2'))
 ADX_PERIOD = int(os.getenv('ADX_PERIOD', '7'))
 
 

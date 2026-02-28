@@ -81,8 +81,11 @@ from session_stats import print_session_summary
 
 # Configuration
 PRICE_ALERT = float(os.getenv('PRICE_ALERT', '0.80'))
+PRICE_ALERT_ENABLED = os.getenv('PRICE_ALERT_ENABLED', '1').lower() in ('1', 'true', 'yes')
 SIGNAL_STRENGTH_BEEP = int(os.getenv('SIGNAL_STRENGTH_BEEP', '50'))
+SIGNAL_ENABLED = os.getenv('SIGNAL_ENABLED', '1').lower() in ('1', 'true', 'yes')
 TRADE_AMOUNT = float(os.getenv('TRADE_AMOUNT', '4'))
+PRICE_BEAT_ALERT = float(os.getenv('PRICE_BEAT_ALERT', '80'))
 HISTORY_MAXLEN = 60
 MARKET_REFRESH_INTERVAL = 60  # seconds between market slug checks
 
@@ -164,6 +167,7 @@ class TradingSession:
         # Timing
         self.last_beep = 0
         self.last_market_check = 0
+        self.last_phase = ""
 
         # Data history
         self.history = deque(maxlen=HISTORY_MAXLEN)
@@ -181,14 +185,14 @@ class TradingSession:
             self.status_msg = ""
 
     def update_alert(self, up_buy, down_buy):
+        if not PRICE_ALERT_ENABLED:
+            return
         max_price = max(up_buy, down_buy)
         if max_price >= PRICE_ALERT:
             if not self.alert_active:
                 self.alert_active = True
                 self.alert_side = "UP" if up_buy >= down_buy else "DOWN"
                 self.alert_price = max_price
-                sys.stdout.write('\a\a')
-                sys.stdout.flush()
             else:
                 self.alert_price = max_price
         else:
@@ -461,7 +465,9 @@ def main():
                                status_msg=f"{Y}Binance error — retrying in {delay:.0f}s...{X}",
                                price_to_beat=session.price_to_beat, trade_history=session.trade_history,
                                last_action=session.last_action, asset_name=config.display_name)
-                    sleep_with_key(delay)
+                    key = sleep_with_key(delay)
+                    if key == 'q':
+                        raise KeyboardInterrupt
                     continue
 
                 _poly_t0 = time.time()
@@ -483,11 +489,15 @@ def main():
                                price_to_beat=session.price_to_beat, trade_history=session.trade_history,
                                last_action=session.last_action, asset_name=config.display_name,
                                poly_latency_ms=session.poly_latency_ms)
-                    sleep_with_key(2)
+                    key = sleep_with_key(2)
+                    if key == 'q':
+                        raise KeyboardInterrupt
                     continue
 
                 # Market phase
                 current_phase, phase_threshold = get_market_phase(current_time, config.window_min)
+
+                session.last_phase = current_phase
 
                 # Update history for signal computation
                 session.history.append({
@@ -499,7 +509,9 @@ def main():
                     up_buy, down_buy, btc_price, binance_data,
                     session.history, regime=current_regime, phase=current_phase)
                 if not session.current_signal:
-                    sleep_with_key(2)
+                    key = sleep_with_key(2)
+                    if key == 'q':
+                        raise KeyboardInterrupt
                     continue
 
                 # Log signal snapshot
@@ -536,13 +548,63 @@ def main():
                                             session.current_signal, session.positions,
                                             current_regime, asset_name=config.display_name))
 
+                # --- MEAN REVERSION ALERT (MID + RSI extreme + BB touch + token cheap) ---
+                if current_phase == 'MID' and (now - session.last_beep) > 30:
+                    rsi = binance_data.get('rsi', 50)
+                    bb = binance_data.get('bb_pos', 0.5)
+                    mr_direction = None
+                    if rsi <= 15 and bb <= 0.10:
+                        mr_direction = 'UP'     # oversold → expect reversal up
+                    elif rsi >= 85 and bb >= 0.90:
+                        mr_direction = 'DOWN'   # overbought → expect reversal down
+
+                    if mr_direction:
+                        token_price = up_buy if mr_direction == 'UP' else down_buy
+                        if token_price < 0.70:
+                            sys.stdout.write('\a\a\a')
+                            sys.stdout.flush()
+                            mr_color = G if mr_direction == 'UP' else R
+                            print(f"   {mr_color}{B}{'═' * 55}{X}")
+                            print(f"   {mr_color}{B}  MEAN REVERSION → {mr_direction} │ RSI={rsi:.0f} BB={bb:.2f} │ ${token_price:.2f}{X}")
+                            print(f"   {W}  Token cheap + RSI extreme + Bollinger touch{X}")
+                            print(f"   {W}  Press {mr_color}{B}{mr_direction[0]}{X}{W} to buy or wait...{X}")
+                            print(f"   {mr_color}{B}{'═' * 55}{X}")
+                            session.last_beep = now
+
+                # --- PRICE TO BEAT ALERT (MID phase + token still cheap) ---
+                elif current_phase == 'MID' and session.price_to_beat > 0 and PRICE_BEAT_ALERT > 0:
+                    price_diff = btc_price - session.price_to_beat
+                    token_price = up_buy if price_diff > 0 else down_buy
+                    if abs(price_diff) >= PRICE_BEAT_ALERT and token_price < 0.70 and (now - session.last_beep) > 30:
+                        beat_dir = 'UP' if price_diff > 0 else 'DOWN'
+                        beat_color = G if beat_dir == 'UP' else R
+                        print(f"   {beat_color}{B}  PRICE BEAT → {beat_dir} │ BTC ${abs(price_diff):.0f} from PTB │ ${token_price:.2f}{X}")
+                        session.last_beep = now
+
+                # --- POSITION MONITOR (TP/SL alert for open positions) ---
+                if session.positions:
+                    for pos in session.positions:
+                        cur_price = up_buy if pos['direction'] == 'up' else down_buy
+                        entry = pos['price']
+                        pnl_pct = (cur_price - entry) / entry if entry > 0 else 0
+                        tp_target = min(entry + 0.20, 0.55)
+                        sl_target = max(entry - 0.15, 0.05)
+                        d_color = G if pos['direction'] == 'up' else R
+                        if cur_price >= tp_target and (now - session.last_beep) > 15:
+                            sys.stdout.write('\a\a')
+                            sys.stdout.flush()
+                            print(f"   {G}{B}  TP HIT │ {pos['direction'].upper()} ${entry:.2f} → ${cur_price:.2f} (+{pnl_pct:+.0%}) │ Press C to close{X}")
+                            session.last_beep = now
+                        elif cur_price <= sl_target and (now - session.last_beep) > 15:
+                            sys.stdout.write('\a')
+                            sys.stdout.flush()
+                            print(f"   {R}{B}  SL HIT │ {pos['direction'].upper()} ${entry:.2f} → ${cur_price:.2f} ({pnl_pct:+.0%}) │ Press C to close{X}")
+                            session.last_beep = now
+
                 # --- OPPORTUNITY DETECTED ---
                 # Use phase-dependent threshold (CLOSING phase = 999, blocks all)
                 effective_threshold = max(SIGNAL_STRENGTH_BEEP, phase_threshold)
-                if strength >= effective_threshold and s_dir != 'NEUTRAL' and sug:
-                    sys.stdout.write('\a\a\a')
-                    sys.stdout.flush()
-
+                if SIGNAL_ENABLED and strength >= effective_threshold and s_dir != 'NEUTRAL' and sug:
                     phase_info = f" │ Phase: {current_phase}" if current_phase != 'MID' else ""
                     regime_info = f" │ Regime: {current_regime}" if current_regime != 'RANGE' else ""
                     print()
@@ -728,7 +790,9 @@ def main():
                 break
             except Exception as e:
                 print(f"   {R}Error: {e}{X}")
-                sleep_with_key(2)
+                key = sleep_with_key(2)
+                if key == 'q':
+                    raise KeyboardInterrupt
 
     finally:
         # Stop WebSocket
